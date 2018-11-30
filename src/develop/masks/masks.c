@@ -42,10 +42,10 @@ typedef struct _masks_undo_data_t
   dt_masks_form_t *form;
 } _masks_undo_data_t;
 
-static void _masks_write_form_db(dt_masks_form_t *form, dt_develop_t *dev);
+static void _masks_write_form_db(dt_masks_form_t *form, const int imgid, dt_develop_t *dev);
 // write a form into the database
 
-static void _masks_write_forms_db(dt_develop_t *dev, gboolean undo);
+static void _masks_write_forms_db(dt_develop_t *dev, const int imgid, gboolean undo);
 // write all masks form into the database. record an undo if undo is true
 
 static dt_masks_form_t *_dup_masks_form(const dt_masks_form_t *form)
@@ -101,8 +101,8 @@ static void *_dup_masks_form_cb(const void *formdata, gpointer user_data)
   return (void *)_dup_masks_form(f);
 }
 
-// duplicate the list of forms, replace item in the list with form is the same formid
-static GList *_dup_masks_forms_deep(GList *forms, dt_masks_form_t *form)
+// duplicate the list of forms, replace item in the list with form with the same formid
+GList *dt_masks_dup_forms_deep(GList *forms, dt_masks_form_t *form)
 {
   return (GList *)g_list_copy_deep(forms, _dup_masks_form_cb, (gpointer)form);
 }
@@ -110,7 +110,7 @@ static GList *_dup_masks_forms_deep(GList *forms, dt_masks_form_t *form)
 static _masks_undo_data_t *_create_snapshot(GList *forms, dt_masks_form_t *form, dt_develop_t *dev)
 {
   _masks_undo_data_t *data = malloc(sizeof(struct _masks_undo_data_t));
-  data->forms = _dup_masks_forms_deep(forms, form);
+  data->forms = dt_masks_dup_forms_deep(forms, form);
   data->form  = dev->form_visible ? _dup_masks_form(dev->form_visible) : NULL;
   return data;
 }
@@ -130,13 +130,13 @@ static void _masks_do_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data
   dt_develop_t *dev = (dt_develop_t *)user_data;
   _masks_undo_data_t *udata = (_masks_undo_data_t *)item;
 
-  dev->forms = _dup_masks_forms_deep(udata->forms, NULL);
+  dev->forms = dt_masks_dup_forms_deep(udata->forms, NULL);
   dev->form_gui->creation = FALSE;
 
   dt_masks_clear_form_gui(dev);
   dt_masks_change_form_gui(_dup_masks_form(udata->form));
 
-  _masks_write_forms_db(dev, FALSE);
+  _masks_write_forms_db(dev, dev->image_storage.id, FALSE);
 
   // and we ensure that we are in edit mode
   dt_masks_iop_update(darktable.develop->gui_module);
@@ -178,10 +178,12 @@ static void _set_hinter_message(dt_masks_form_gui_t *gui, dt_masks_type_t formty
   }
   else if(formtype & DT_MASKS_ELLIPSE)
   {
-    if(gui->point_selected >= 0)
+    if(gui->creation)
+      g_strlcat(msg, _("scroll to set size, shift+scroll to set feather size\nctrl+scroll to set shape opacity"), sizeof(msg));
+    else if(gui->point_selected >= 0)
       g_strlcat(msg, _("ctrl+click to rotate"), sizeof(msg));
     else if(gui->form_selected)
-      g_strlcat(msg, _("shift+click to switch feathering mode, ctrl+scroll to set shape opacity,\nshift+scroll to set feather size"), sizeof(msg));
+      g_strlcat(msg, _("shift+click to switch feathering mode, ctrl+scroll to set shape opacity,\nshift+scroll to set feather size, ctrl+click to rotate"), sizeof(msg));
   }
   else if(formtype & DT_MASKS_BRUSH)
   {
@@ -195,7 +197,9 @@ static void _set_hinter_message(dt_masks_form_gui_t *gui, dt_masks_type_t formty
   }
   else if(formtype & DT_MASKS_CIRCLE)
   {
-    if(gui->form_selected)
+    if(gui->creation)
+      g_strlcat(msg, _("scroll to set size, shift+scroll to set feather size\nctrl+scroll to set shape opacity"), sizeof(msg));
+    else if(gui->form_selected)
       g_strlcat(msg, _("ctrl+scroll to set shape opacity, shift+scroll to set feather size"), sizeof(msg));
   }
 
@@ -961,9 +965,8 @@ dt_masks_form_t *dt_masks_create(dt_masks_type_t type)
   return form;
 }
 
-dt_masks_form_t *dt_masks_get_from_id(dt_develop_t *dev, int id)
+dt_masks_form_t *dt_masks_get_from_id_ext(GList *forms, int id)
 {
-  GList *forms = g_list_first(dev->forms);
   while(forms)
   {
     dt_masks_form_t *form = (dt_masks_form_t *)forms->data;
@@ -973,21 +976,25 @@ dt_masks_form_t *dt_masks_get_from_id(dt_develop_t *dev, int id)
   return NULL;
 }
 
+dt_masks_form_t *dt_masks_get_from_id(dt_develop_t *dev, int id)
+{
+  return dt_masks_get_from_id_ext(dev->forms, id);
+}
 
-void dt_masks_read_forms(dt_develop_t *dev)
+void dt_masks_read_forms_ext(dt_develop_t *dev, const int imgid, gboolean no_image)
 {
   // first we have to reset the list
   g_list_free(dev->forms);
   dev->forms = NULL;
 
-  if(dev->image_storage.id <= 0) return;
+  if(imgid <= 0) return;
 
   sqlite3_stmt *stmt;
   DT_DEBUG_SQLITE3_PREPARE_V2(
       dt_database_get(darktable.db),
       "SELECT imgid, formid, form, name, version, points, points_count, source FROM main.mask WHERE imgid = ?1",
       -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev->image_storage.id);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
 
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
@@ -1069,7 +1076,7 @@ void dt_masks_read_forms(dt_develop_t *dev)
 
         fprintf(stderr,
                 "[dt_masks_read_forms] %s (imgid `%i'): mask version mismatch: history is %d, dt %d.\n",
-                fname, dev->image_storage.id, form->version, dt_masks_version());
+                fname, imgid, form->version, dt_masks_version());
         dt_control_log(_("%s: mask version mismatch: %d != %d"), fname, dt_masks_version(), form->version);
 
         continue;
@@ -1081,16 +1088,22 @@ void dt_masks_read_forms(dt_develop_t *dev)
   }
 
   sqlite3_finalize(stmt);
+  if(!no_image)
   dt_dev_masks_list_change(dev);
 }
 
-static void _masks_write_forms_db(dt_develop_t *dev, gboolean undo)
+void dt_masks_read_forms(dt_develop_t *dev)
+{
+  dt_masks_read_forms_ext(dev, dev->image_storage.id, FALSE);
+}
+
+static void _masks_write_forms_db(dt_develop_t *dev, const int imgid, gboolean undo)
 {
   // we first erase all masks for the image present in the db
   sqlite3_stmt *stmt;
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "DELETE FROM main.mask WHERE imgid = ?1", -1, &stmt,
                               NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev->image_storage.id);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
 
@@ -1106,12 +1119,12 @@ static void _masks_write_forms_db(dt_develop_t *dev, gboolean undo)
     dt_masks_form_t *form = (dt_masks_form_t *)forms->data;
 
     if (form)
-      _masks_write_form_db(form, dev);
+      _masks_write_form_db(form, imgid, dev);
 
     forms = g_list_next(forms);
   }
 }
-static void _masks_write_form_db(dt_masks_form_t *form, dt_develop_t *dev)
+static void _masks_write_form_db(dt_masks_form_t *form, const int imgid, dt_develop_t *dev)
 {
   sqlite3_stmt *stmt;
 
@@ -1120,7 +1133,7 @@ static void _masks_write_form_db(dt_masks_form_t *form, dt_develop_t *dev)
                                                              "version, points, points_count,source) VALUES "
                                                              "(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                               -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev->image_storage.id);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, form->formid);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, form->type);
   DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, form->name, -1, SQLITE_TRANSIENT);
@@ -1223,12 +1236,17 @@ void dt_masks_write_form(dt_masks_form_t *form, dt_develop_t *dev)
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
 
-  _masks_write_form_db(form, dev);
+  _masks_write_form_db(form, dev->image_storage.id, dev);
+}
+
+void dt_masks_write_forms_ext(dt_develop_t *dev, const int imgid, gboolean undo)
+{
+  _masks_write_forms_db(dev, imgid, undo);
 }
 
 void dt_masks_write_forms(dt_develop_t *dev)
 {
-  _masks_write_forms_db(dev, TRUE);
+  _masks_write_forms_db(dev, dev->image_storage.id, TRUE);
 }
 
 void dt_masks_free_form(dt_masks_form_t *form)
@@ -1241,14 +1259,17 @@ void dt_masks_free_form(dt_masks_form_t *form)
 
 int dt_masks_events_mouse_leave(struct dt_iop_module_t *module)
 {
-  dt_masks_form_t *form = darktable.develop->form_visible;
-
   // reset mouse position for masks
-  if(form && darktable.develop->form_gui)
+  if(darktable.develop->form_gui)
   {
     dt_masks_form_gui_t *gui = darktable.develop->form_gui;
+
+    // if masks are being created or edited don't reset the position
+    if(gui->creation || gui->form_dragging || gui->source_dragging || gui->point_dragging >= 0
+       || gui->feather_dragging >= 0 || gui->seg_dragging >= 0 || gui->point_border_dragging >= 0)
+      return 0;
+
     gui->posx = gui->posy = -1.f;
-    return 1;
   }
   return 0;
 }
@@ -1428,7 +1449,7 @@ void dt_masks_events_post_expose(struct dt_iop_module_t *module, cairo_t *cr, in
   // add preview when creating a circle or ellipse
   if((form->type & DT_MASKS_GRADIENT) && gui->creation)
     return;
-  
+
   float wd = dev->preview_pipe->backbuf_width;
   float ht = dev->preview_pipe->backbuf_height;
   if(wd < 1.0 || ht < 1.0) return;
@@ -2506,17 +2527,17 @@ void dt_masks_draw_clone_source_pos(cairo_t *cr, const float zoom_scale, const f
   double dashed[] = { 4.0, 4.0 };
   dashed[0] /= zoom_scale;
   dashed[1] /= zoom_scale;
-  
+
   cairo_set_dash(cr, dashed, 0, 0);
   cairo_set_line_width(cr, 3.0 / zoom_scale);
   cairo_set_source_rgba(cr, .3, .3, .3, .8);
-  
+
   cairo_move_to(cr, x + dx, y);
   cairo_line_to(cr, x - dx, y);
   cairo_move_to(cr, x, y + dy);
   cairo_line_to(cr, x, y - dy);
   cairo_stroke_preserve(cr);
-  
+
   cairo_set_line_width(cr, 1.0 / zoom_scale);
   cairo_set_source_rgba(cr, .8, .8, .8, .8);
   cairo_stroke(cr);
@@ -2527,18 +2548,104 @@ void dt_masks_draw_clone_source_pos(cairo_t *cr, const float zoom_scale, const f
 void dt_masks_set_source_pos_initial_state(dt_masks_form_gui_t *gui, const uint32_t state, const float pzx,
                                            const float pzy)
 {
-  if(state & GDK_CONTROL_MASK)
+  if((state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK)) == (GDK_SHIFT_MASK | GDK_CONTROL_MASK))
     gui->source_pos_type = DT_MASKS_SOURCE_POS_ABSOLUTE;
-  else if(state & GDK_SHIFT_MASK)
+  else if((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
     gui->source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE_TEMP;
   else
-    fprintf(stderr, "unknown state for setting masks position type\n");
+    fprintf(stderr, "[dt_masks_set_source_pos_initial_state] unknown state for setting masks position type\n");
 
   // both source types record an absolute position,
   // for the relative type, the first time is used the position is recorded,
   // the second time a relative position is calculated based on that one
   gui->posx_source = pzx * darktable.develop->preview_pipe->backbuf_width;
   gui->posy_source = pzy * darktable.develop->preview_pipe->backbuf_height;
+}
+
+// set the initial source position value for a clone mask
+void dt_masks_set_source_pos_initial_value(dt_masks_form_gui_t *gui, const int mask_type, dt_masks_form_t *form,
+                                                   const float pzx, const float pzy)
+{
+  const float wd = darktable.develop->preview_pipe->backbuf_width;
+  const float ht = darktable.develop->preview_pipe->backbuf_height;
+  const float iwd = darktable.develop->preview_pipe->iwidth;
+  const float iht = darktable.develop->preview_pipe->iheight;
+
+  // if this is the first time the relative pos is used
+  if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)
+  {
+    // if is has not been defined by the user, set some default
+    if(gui->posx_source == -1.f && gui->posy_source == -1.f)
+    {
+      if(mask_type & DT_MASKS_CIRCLE)
+      {
+        const float radius = MIN(0.5f, dt_conf_get_float("plugins/darkroom/spots/circle_size"));
+        
+        gui->posx_source = (radius * iwd);
+        gui->posy_source = -(radius * iht);
+      }
+      else if(mask_type & DT_MASKS_ELLIPSE)
+      {
+        const float radius_a = dt_conf_get_float("plugins/darkroom/spots/ellipse_radius_a");
+        const float radius_b = dt_conf_get_float("plugins/darkroom/spots/ellipse_radius_b");
+        
+        gui->posx_source = (radius_a * iwd);
+        gui->posy_source = -(radius_b * iht);
+      }
+      else if(mask_type & DT_MASKS_PATH)
+      {
+        gui->posx_source = (0.02f * iwd);
+        gui->posy_source = (0.02f * iht);
+      }
+      else if(mask_type & DT_MASKS_BRUSH)
+      {
+        gui->posx_source = 0.01f * iwd;
+        gui->posy_source = 0.01f * iht;
+      }
+      else
+        fprintf(stderr, "[dt_masks_set_source_pos_initial_value] unsuported masks type when calculating source position initial value\n");
+      
+      float pts[2] = { pzx * wd + gui->posx_source, pzy * ht + gui->posy_source };
+      dt_dev_distort_backtransform(darktable.develop, pts, 1);
+
+      form->source[0] = pts[0] / iwd;
+      form->source[1] = pts[1] / iht;
+    }
+    else
+    {
+      // if a position was defined by the user, use the absolute value the first time
+      float pts[2] = { gui->posx_source, gui->posy_source };
+      dt_dev_distort_backtransform(darktable.develop, pts, 1);
+
+      form->source[0] = pts[0] / iwd;
+      form->source[1] = pts[1] / iht;
+      
+      gui->posx_source = gui->posx_source - pzx * wd;
+      gui->posy_source = gui->posy_source - pzy * ht;
+    }
+
+    gui->source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE;
+  }
+  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
+  {
+    // original pos was already defined and relative value calculated, just use it
+    float pts[2] = { pzx * wd + gui->posx_source, pzy * ht + gui->posy_source };
+    dt_dev_distort_backtransform(darktable.develop, pts, 1);
+    
+    form->source[0] = pts[0] / iwd;
+    form->source[1] = pts[1] / iht;
+  }
+  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)
+  {
+    // an absolute position was defined by the user
+    float pts_src[2] = { gui->posx_source, gui->posy_source };
+    dt_dev_distort_backtransform(darktable.develop, pts_src, 1);
+
+    form->source[0] = pts_src[0] / iwd;
+    form->source[1] = pts_src[1] / iht;
+  }
+  else
+    fprintf(stderr, "[dt_masks_set_source_pos_initial_value] unknown source position type\n");
 }
 
 // calculates the source position value for preview drawing, on cairo coordinates
@@ -2548,13 +2655,13 @@ void dt_masks_calculate_source_pos_value(dt_masks_form_gui_t *gui, const int mas
 {
   float x = 0.f, y = 0.f;
 
-  const float wd = darktable.develop->preview_pipe->iwidth;
-  const float ht = darktable.develop->preview_pipe->iheight;
+  const float iwd = darktable.develop->preview_pipe->iwidth;
+  const float iht = darktable.develop->preview_pipe->iheight;
 
   if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
   {
-    x = xpos + gui->posx_source * wd;
-    y = ypos + gui->posy_source * ht;
+    x = xpos + gui->posx_source;
+    y = ypos + gui->posy_source;
   }
   else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)
   {
@@ -2563,28 +2670,28 @@ void dt_masks_calculate_source_pos_value(dt_masks_form_gui_t *gui, const int mas
       if(mask_type & DT_MASKS_CIRCLE)
       {
         const float radius = MIN(0.5f, dt_conf_get_float("plugins/darkroom/spots/circle_size"));
-        x = xpos + radius * wd;
-        y = ypos - radius * ht;
+        x = xpos + radius * iwd;
+        y = ypos - radius * iht;
       }
       else if(mask_type & DT_MASKS_ELLIPSE)
       {
         const float radius_a = dt_conf_get_float("plugins/darkroom/spots/ellipse_radius_a");
         const float radius_b = dt_conf_get_float("plugins/darkroom/spots/ellipse_radius_b");
-        x = xpos + radius_a * wd;
-        y = ypos - radius_b * ht;
+        x = xpos + radius_a * iwd;
+        y = ypos - radius_b * iht;
       }
       else if(mask_type & DT_MASKS_PATH)
       {
-        x = xpos + 0.02f * wd;
-        y = ypos + 0.02f * ht;
+        x = xpos + 0.02f * iwd;
+        y = ypos + 0.02f * iht;
       }
       else if(mask_type & DT_MASKS_BRUSH)
       {
-        x = xpos + 0.01f * wd;
-        y = ypos + 0.01f * ht;
+        x = xpos + 0.01f * iwd;
+        y = ypos + 0.01f * iht;
       }
       else
-        fprintf(stderr, "unsuported masks type when calculating source position value\n");
+        fprintf(stderr, "[dt_masks_calculate_source_pos_value] unsuported masks type when calculating source position value\n");
     }
     else
     {
@@ -2608,7 +2715,7 @@ void dt_masks_calculate_source_pos_value(dt_masks_form_gui_t *gui, const int mas
     }
   }
   else
-    fprintf(stderr, "unknown source position type for setting source position value\n");
+    fprintf(stderr, "[dt_masks_calculate_source_pos_value] unknown source position type for setting source position value\n");
 
   *px = x;
   *py = y;

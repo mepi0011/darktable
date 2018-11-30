@@ -55,54 +55,6 @@ static void dt_circle_get_distance(float x, int y, float as, dt_masks_form_gui_t
   *inside_border = !(dt_masks_point_in_form_near(x,yf,gpt->points,1,gpt->points_count,as,near));
 }
 
-// set the initial source position value for a clone mask
-static void dt_circle_set_source_pos_initial_value(dt_masks_form_gui_t *gui, dt_masks_form_t *form,
-                                                   dt_masks_point_circle_t *circle)
-{
-  // if this is the first time the relative pos is used
-  if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)
-  {
-    // if is has not been defined by the user, set some default
-    if(gui->posx_source == -1.f && gui->posy_source == -1.f)
-    {
-      form->source[0] = circle->center[0] + circle->radius;
-      form->source[1] = circle->center[1] - circle->radius;
-    }
-    else
-    {
-      // if a position was defined by the user, use the absolute value the first time
-      float pts_src[2] = { gui->posx_source, gui->posy_source };
-      dt_dev_distort_backtransform(darktable.develop, pts_src, 1);
-
-      form->source[0] = pts_src[0] / darktable.develop->preview_pipe->iwidth;
-      form->source[1] = pts_src[1] / darktable.develop->preview_pipe->iheight;
-    }
-
-    // save the relative value for the next time
-    gui->posx_source = form->source[0] - circle->center[0];
-    gui->posy_source = form->source[1] - circle->center[1];
-
-    gui->source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
-  {
-    // original pos was already defined and relative value calculated, just use it
-    form->source[0] = circle->center[0] + gui->posx_source;
-    form->source[1] = circle->center[1] + gui->posy_source;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)
-  {
-    // an absolute position was defined by the user
-    float pts_src[2] = { gui->posx_source, gui->posy_source };
-    dt_dev_distort_backtransform(darktable.develop, pts_src, 1);
-
-    form->source[0] = pts_src[0] / darktable.develop->preview_pipe->iwidth;
-    form->source[1] = pts_src[1] / darktable.develop->preview_pipe->iheight;
-  }
-  else
-    fprintf(stderr, "unknown source position type\n");
-}
-
 static int dt_circle_events_mouse_scrolled(struct dt_iop_module_t *module, float pzx, float pzy, int up,
                                            uint32_t state, dt_masks_form_t *form, int parentid,
                                            dt_masks_form_gui_t *gui, int index)
@@ -167,9 +119,10 @@ static int dt_circle_events_mouse_scrolled(struct dt_iop_module_t *module, float
     else
     {
       dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)(g_list_first(form->points)->data);
-      if(gui->border_selected || (state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
+      // resize don't care where the mouse is inside a shape
+      if((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
       {
-        if(up && circle->border > 0.001f)
+        if(up && circle->border > 0.0005f)
           circle->border *= 0.97f;
         else if(!up && circle->border < 1.0f)
           circle->border *= 1.0f / 0.97f;
@@ -245,7 +198,9 @@ static int dt_circle_events_button_pressed(struct dt_iop_module_t *module, float
     dt_control_queue_redraw_center();
     return 1;
   }
-  else if(gui->creation && (state & (GDK_CONTROL_MASK|GDK_SHIFT_MASK)))
+  else if(gui->creation && which == 1
+          && (((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))
+              || ((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)))
   {
     // set some absolute or relative position for the source of the clone mask
     if(form->type & DT_MASKS_CLONE) dt_masks_set_source_pos_initial_state(gui, state, pzx, pzy);
@@ -276,7 +231,7 @@ static int dt_circle_events_button_pressed(struct dt_iop_module_t *module, float
       // calculate the source position
       if(form->type & DT_MASKS_CLONE)
       {
-        dt_circle_set_source_pos_initial_value(gui, form, circle);
+        dt_masks_set_source_pos_initial_value(gui, DT_MASKS_CIRCLE, form, pzx, pzy);
       }
       else
       {
@@ -288,8 +243,8 @@ static int dt_circle_events_button_pressed(struct dt_iop_module_t *module, float
     {
       const float circle_size = MIN(0.5f, dt_conf_get_float("plugins/darkroom/masks/circle/size"));
       const float circle_border = MIN(0.5f, dt_conf_get_float("plugins/darkroom/masks/circle/border"));
-      circle->radius = MAX(0.01f, circle_size);
-      circle->border = MAX(0.005f, circle_border);
+      circle->radius = MAX(0.001f, circle_size);
+      circle->border = MAX(0.0005f, circle_border);
       // not used for masks
       form->source[0] = form->source[1] = 0.0f;
     }
@@ -562,11 +517,8 @@ static void dt_circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks
       float xpos, ypos;
       if(gui->posx == -1.f && gui->posy == -1.f)
       {
-        float zoom_x, zoom_y;
-        zoom_y = dt_control_get_dev_zoom_y();
-        zoom_x = dt_control_get_dev_zoom_x();
-        xpos = (.5f + zoom_x) * wd;
-        ypos = (.5f + zoom_y) * ht;
+        xpos = (.5f + dt_control_get_dev_zoom_x()) * darktable.develop->preview_pipe->backbuf_width;
+        ypos = (.5f + dt_control_get_dev_zoom_y()) * darktable.develop->preview_pipe->backbuf_height;
       }
       else
       {

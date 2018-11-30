@@ -29,6 +29,7 @@
 #include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 #include <gtk/gtk.h>
 #include <stdint.h>
@@ -91,6 +92,7 @@ typedef struct dt_iop_rawprepare_global_data_t
   int kernel_rawprepare_4f;
 } dt_iop_rawprepare_global_data_t;
 
+
 const char *name()
 {
   return C_("modulename", "raw black/white point");
@@ -108,7 +110,7 @@ int flags()
 
 int groups()
 {
-  return IOP_GROUP_BASIC;
+  return dt_iop_get_group("raw black/white point", IOP_GROUP_BASIC);
 }
 
 void init_presets(dt_iop_module_so_t *self)
@@ -711,12 +713,18 @@ void init_global(dt_iop_module_so_t *self)
 
 void init(dt_iop_module_t *self)
 {
-  const dt_image_t *const image = &(self->dev->image_storage);
 
   self->params = calloc(1, sizeof(dt_iop_rawprepare_params_t));
   self->default_params = calloc(1, sizeof(dt_iop_rawprepare_params_t));
   self->hide_enable_button = 1;
-  self->default_enabled = dt_image_is_raw(image) && !image_is_normalized(image);
+  self->default_enabled = 0;
+  if(self->dev)
+  { // just being extra careful here, because there is a case when old presets
+    // are upgraded and temporary modules are constructed for this, with a 0x0 dev
+    // pointer. i suppose the can be solved more elegantly on the other side.
+    const dt_image_t *const image = &(self->dev->image_storage);
+    self->default_enabled = dt_image_is_raw(image) && !image_is_normalized(image);
+  }
   self->priority = 14; // module order created by iop_dependencies.py, do not edit!
   self->params_size = sizeof(dt_iop_rawprepare_params_t);
   self->gui_data = NULL;
@@ -804,6 +812,7 @@ void gui_init(dt_iop_module_t *self)
   dt_iop_rawprepare_params_t *p = (dt_iop_rawprepare_params_t *)self->params;
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
 
   g->box_raw = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 

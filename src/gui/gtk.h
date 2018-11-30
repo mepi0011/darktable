@@ -44,6 +44,15 @@ typedef struct dt_gui_widgets_t
 
 } dt_gui_widgets_t;
 
+typedef struct dt_gui_scrollbars_t
+{
+    GtkWidget *vscrollbar;
+    GtkWidget *hscrollbar;
+
+    gboolean visible;
+    gboolean dragging;
+} dt_gui_scrollbars_t;
+
 typedef enum dt_gui_color_t {
   DT_GUI_COLOR_BG = 0,
   DT_GUI_COLOR_DARKROOM_BG,
@@ -61,6 +70,8 @@ typedef struct dt_gui_gtk_t
   struct dt_ui_t *ui;
 
   dt_gui_widgets_t widgets;
+
+  dt_gui_scrollbars_t scrollbars;
 
   cairo_surface_t *surface;
   GtkMenu *presets_popup_menu;
@@ -254,6 +265,10 @@ void dt_ui_panel_show(struct dt_ui_t *ui, const dt_ui_panel_t, gboolean show, gb
 void dt_ui_border_show(struct dt_ui_t *ui, gboolean show);
 /** \brief restore saved state of panel visibility for current view */
 void dt_ui_restore_panels(struct dt_ui_t *ui);
+/** \brief update scrollbars for current view */
+void dt_ui_update_scrollbars(struct dt_ui_t *ui);
+/** show or hide scrollbars */
+void dt_ui_scrollbars_show(struct dt_ui_t *ui, gboolean show);
 /** \brief toggle view of panels eg. collaps/expands to previous view state */
 void dt_ui_toggle_panels_visibility(struct dt_ui_t *ui);
 /** \brief draw user's attention */
@@ -273,7 +288,6 @@ void dt_ellipsize_combo(GtkComboBox *cbox);
 static inline void dt_ui_section_label_set(GtkWidget *label)
 {
   gtk_widget_set_halign(label, GTK_ALIGN_FILL); // make it span the whole available width
-  gtk_widget_set_hexpand(label, TRUE); // not really needed, but it makes sure that parent containers expand
   g_object_set(G_OBJECT(label), "xalign", 1.0, (gchar *)0);    // make the text right aligned
   gtk_widget_set_margin_bottom(label, DT_PIXEL_APPLY_DPI(10)); // gtk+ css doesn't support margins :(
   gtk_widget_set_margin_start(label, DT_PIXEL_APPLY_DPI(30)); // gtk+ css doesn't support margins :(

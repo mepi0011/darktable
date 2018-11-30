@@ -1013,78 +1013,6 @@ static float _brush_get_position_in_segment(float x, float y, dt_masks_form_t *f
   return tmin;
 }
 
-// set the initial source position value for a clone mask
-static void dt_brush_set_source_pos_initial_value(dt_masks_form_gui_t *gui, dt_masks_form_t *form, float *points,
-                                                  const float pzx, const float pzy)
-{
-  const float iwd = darktable.develop->preview_pipe->iwidth;
-  const float iht = darktable.develop->preview_pipe->iheight;
-  float pts[2] = { 0.f };
-
-  // if this is the first time the relative pos is used
-  if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)
-  {
-    // if is has not been defined by the user, set some default
-    if(gui->posx_source == -1.f && gui->posy_source == -1.f)
-    {
-      pts[0] = points[0];
-      pts[1] = points[1];
-      dt_dev_distort_backtransform(darktable.develop, pts, 1);
-      pts[0] /= iwd;
-      pts[1] /= iht;
-
-      form->source[0] = pts[0] + 0.01f;
-      form->source[1] = pts[1] + 0.01f;
-    }
-    else
-    {
-      // if a position was defined by the user, use the absolute value the first time
-      pts[0] = gui->posx_source;
-      pts[1] = gui->posy_source;
-      dt_dev_distort_backtransform(darktable.develop, pts, 1);
-
-      form->source[0] = pts[0] / iwd;
-      form->source[1] = pts[1] / iht;
-    }
-
-    // save the relative value for the next time
-    pts[0] = points[0];
-    pts[1] = points[1];
-    dt_dev_distort_backtransform(darktable.develop, pts, 1);
-    pts[0] /= iwd;
-    pts[1] /= iht;
-
-    gui->posx_source = form->source[0] - pts[0];
-    gui->posy_source = form->source[1] - pts[1];
-
-    gui->source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
-  {
-    // original pos was already defined and relative value calculated, just use it
-    pts[0] = points[0];
-    pts[1] = points[1];
-    dt_dev_distort_backtransform(darktable.develop, pts, 1);
-    pts[0] /= iwd;
-    pts[1] /= iht;
-
-    form->source[0] = pts[0] + gui->posx_source;
-    form->source[1] = pts[1] + gui->posy_source;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)
-  {
-    // an absolute position was defined by the user
-    pts[0] = gui->posx_source;
-    pts[1] = gui->posy_source;
-    dt_dev_distort_backtransform(darktable.develop, pts, 1);
-
-    form->source[0] = pts[0] / iwd;
-    form->source[1] = pts[1] / iht;
-  }
-  else
-    fprintf(stderr, "unknown source position type\n");
-}
-
 static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float pzx, float pzy, int up,
                                           uint32_t state, dt_masks_form_t *form, int parentid,
                                           dt_masks_form_gui_t *gui, int index)
@@ -1094,8 +1022,8 @@ static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float 
     if((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
     {
       float masks_hardness;
-      float amount = 1.25f;
-      if(up) amount = 0.8f;
+      float amount = 1.03f;
+      if(up) amount = 0.97f;
 
       if(form->type & (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))
       {
@@ -1118,8 +1046,8 @@ static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float 
     else if((state & GDK_CONTROL_MASK) == GDK_CONTROL_MASK)
     {
       float masks_density;
-      float amount = 1.25f;
-      if(up) amount = 0.8f;
+      float amount = 1.03f;
+      if(up) amount = 0.97f;
 
       if(form->type & (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))
       {
@@ -1149,7 +1077,7 @@ static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float 
       if(form->type & (DT_MASKS_CLONE|DT_MASKS_NON_CLONE))
       {
         masks_border = dt_conf_get_float("plugins/darkroom/spots/brush_border");
-        masks_border = MAX(0.005f, MIN(masks_border * amount, 0.5f));
+        masks_border = MAX(0.0005f, MIN(masks_border * amount, 0.5f));
         dt_conf_set_float("plugins/darkroom/spots/brush_border", masks_border);
       }
       else
@@ -1184,7 +1112,8 @@ static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float 
     else
     {
       guint nb = g_list_length(form->points);
-      if(gui->border_selected || (state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
+      // resize don't care where the mouse is inside a shape
+      if((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
       {
         float amount = 1.03f;
         if(up) amount = 0.97f;
@@ -1215,8 +1144,8 @@ static int dt_brush_events_mouse_scrolled(struct dt_iop_module_t *module, float 
       }
       else
       {
-        float amount = 1.25f;
-        if(up) amount = 0.8f;
+        float amount = 1.03f;
+        if(up) amount = 0.97f;
         for(int k = 0; k < nb; k++)
         {
           dt_masks_point_brush_t *point = (dt_masks_point_brush_t *)g_list_nth_data(form->points, k);
@@ -1279,7 +1208,9 @@ static int dt_brush_events_button_pressed(struct dt_iop_module_t *module, float 
   else
     masks_density = MIN(dt_conf_get_float("plugins/darkroom/masks/brush/density"), 1.0f);
 
-  if(gui->creation && which == 1 && (state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)))
+  if(gui->creation && which == 1
+     && (((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))
+         || ((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)))
   {
     // set some absolute or relative position for the source of the clone mask
     if(form->type & DT_MASKS_CLONE) dt_masks_set_source_pos_initial_state(gui, state, pzx, pzy);
@@ -1309,7 +1240,7 @@ static int dt_brush_events_button_pressed(struct dt_iop_module_t *module, float 
       // add support for clone masks
       if(form->type & DT_MASKS_CLONE)
       {
-        dt_brush_set_source_pos_initial_value(gui, form, dt_masks_dynbuf_buffer(gui->guipoints), pzx, pzy);
+        dt_masks_set_source_pos_initial_value(gui, DT_MASKS_BRUSH, form, pzx, pzy);
       }
       else
       {
@@ -2228,11 +2159,8 @@ static void dt_brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_
       float xpos, ypos;
       if(gui->posx == -1.f && gui->posy == -1.f)
       {
-        float zoom_x, zoom_y;
-        zoom_y = dt_control_get_dev_zoom_y();
-        zoom_x = dt_control_get_dev_zoom_x();
-        xpos = (.5f + zoom_x) * wd;
-        ypos = (.5f + zoom_y) * ht;
+        xpos = (.5f + dt_control_get_dev_zoom_x()) * darktable.develop->preview_pipe->backbuf_width;
+        ypos = (.5f + dt_control_get_dev_zoom_y()) * darktable.develop->preview_pipe->backbuf_height;
       }
       else
       {

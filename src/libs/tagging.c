@@ -474,6 +474,7 @@ void gui_init(dt_lib_module_t *self)
   d->imgsel = -1;
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->plugin_name));
   //   gtk_widget_set_size_request(self->widget, DT_PIXEL_APPLY_DPI(100), -1);
 
   GtkBox *box, *hbox;
@@ -501,6 +502,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_tree_view_set_model(d->current, GTK_TREE_MODEL(liststore));
   g_object_unref(liststore);
   gtk_widget_set_tooltip_text(GTK_WIDGET(d->current), _("attached tags,\ndoubleclick to detach"));
+  dt_gui_add_help_link(GTK_WIDGET(d->current), "tagging.html#tagging_usage");
   g_signal_connect(G_OBJECT(d->current), "row-activated", G_CALLBACK(detach_activated), (gpointer)self);
   gtk_container_add(GTK_CONTAINER(w), GTK_WIDGET(d->current));
 
@@ -510,12 +512,14 @@ void gui_init(dt_lib_module_t *self)
   button = gtk_button_new_with_label(_("attach"));
   d->attach_button = button;
   gtk_widget_set_tooltip_text(button, _("attach tag to all selected images"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(attach_button_clicked), (gpointer)self);
 
   button = gtk_button_new_with_label(_("detach"));
   d->detach_button = button;
   gtk_widget_set_tooltip_text(button, _("detach tag from all selected images"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(detach_button_clicked), (gpointer)self);
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
 
@@ -528,6 +532,7 @@ void gui_init(dt_lib_module_t *self)
   // text entry and new button
   w = gtk_entry_new();
   gtk_widget_set_tooltip_text(w, _("enter tag name"));
+  dt_gui_add_help_link(w, "tagging.html#tagging_usage");
   gtk_box_pack_start(box, w, TRUE, TRUE, 0);
   gtk_widget_add_events(GTK_WIDGET(w), GDK_KEY_RELEASE_MASK);
   // g_signal_connect(G_OBJECT(w), "key-release-event",
@@ -553,6 +558,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_tree_view_set_model(d->related, GTK_TREE_MODEL(liststore));
   g_object_unref(liststore);
   gtk_widget_set_tooltip_text(GTK_WIDGET(d->related), _("related tags,\ndoubleclick to attach"));
+  dt_gui_add_help_link(GTK_WIDGET(d->related), "tagging.html#tagging_usage");
   g_signal_connect(G_OBJECT(d->related), "row-activated", G_CALLBACK(attach_activated), (gpointer)self);
   gtk_container_add(GTK_CONTAINER(w), GTK_WIDGET(d->related));
 
@@ -562,24 +568,28 @@ void gui_init(dt_lib_module_t *self)
   button = gtk_button_new_with_label(_("new"));
   d->new_button = button;
   gtk_widget_set_tooltip_text(button, _("create a new tag with the\nname you entered"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(new_button_clicked), (gpointer)self);
 
   button = gtk_button_new_with_label(_("delete"));
   d->delete_button = button;
   gtk_widget_set_tooltip_text(button, _("delete selected tag"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(delete_button_clicked), (gpointer)self);
 
   button = gtk_button_new_with_label(C_("verb", "import"));
   d->import_button = button;
   gtk_widget_set_tooltip_text(button, _("import tags from a Lightroom keyword file"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(import_button_clicked), (gpointer)self);
 
   button = gtk_button_new_with_label(C_("verb", "export"));
   d->export_button = button;
   gtk_widget_set_tooltip_text(button, _("export all tags to a Lightroom keyword file"));
+  dt_gui_add_help_link(button, "tagging.html#tagging_usage");
   gtk_box_pack_start(hbox, button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(export_button_clicked), (gpointer)self);
 
@@ -646,10 +656,62 @@ static gboolean _lib_tagging_tag_destroy(GtkWidget *widget, GdkEvent *event, gpo
   return FALSE;
 }
 
+static gboolean _match_selected_func(GtkEntryCompletion *completion, GtkTreeModel *model, GtkTreeIter *iter, gpointer user_data)
+{
+  char *tag = NULL;
+  int column = gtk_entry_completion_get_text_column(completion);
+
+  if(gtk_tree_model_get_column_type(model, column) != G_TYPE_STRING) return TRUE;
+
+  GtkEditable *e = (GtkEditable *)gtk_entry_completion_get_entry(completion);
+  if(!GTK_IS_EDITABLE(e))
+  {
+    return FALSE;
+  }
+
+  gtk_tree_model_get(model, iter, column, &tag, -1);
+  
+  gint cut_off, cur_pos = gtk_editable_get_position(e);
+
+  gchar *currentText = gtk_editable_get_chars(e, 0, -1);
+  const gchar *lastTag = g_strrstr(currentText, ",");
+  if(lastTag == NULL)
+  {
+    cut_off = 0;
+  }
+  else
+  {
+    cut_off = (int)(g_utf8_strlen(currentText, -1) - g_utf8_strlen(lastTag, -1))+1;
+  }
+  free(currentText);
+
+  gtk_editable_delete_text(e, cut_off, cur_pos);
+  cur_pos = cut_off;
+  gtk_editable_insert_text(e, tag, -1, &cur_pos);
+  gtk_editable_set_position(e, cur_pos);
+  return TRUE;
+}      
+
 static gboolean _completion_match_func(GtkEntryCompletion *completion, const gchar *key, GtkTreeIter *iter,
                                        gpointer user_data)
 {
   gboolean res = FALSE;
+
+  GtkEditable *e = (GtkEditable *)gtk_entry_completion_get_entry(completion);
+
+  if(!GTK_IS_EDITABLE(e))
+  {
+    return FALSE;
+  }
+  
+  gint cur_pos = gtk_editable_get_position(e);
+  gboolean onLastTag = (g_strstr_len(&key[cur_pos], -1, ",") == NULL);
+  if(!onLastTag)
+  {
+    return FALSE;
+  }
+  
+  
   char *tag = NULL;
   GtkTreeModel *model = gtk_entry_completion_get_model(completion);
   int column = gtk_entry_completion_get_text_column(completion);
@@ -657,6 +719,20 @@ static gboolean _completion_match_func(GtkEntryCompletion *completion, const gch
   if(gtk_tree_model_get_column_type(model, column) != G_TYPE_STRING) return FALSE;
 
   gtk_tree_model_get(model, iter, column, &tag, -1);
+
+  const gchar *lastTag = g_strrstr(key, ",");
+  if(lastTag != NULL)
+  {
+    lastTag++;
+  }
+  else
+  {
+    lastTag = key;
+  }
+  if(lastTag[0] == '\0' && key[0] != '\0')
+  {
+    return FALSE;
+  }
 
   if(tag)
   {
@@ -666,7 +742,7 @@ static gboolean _completion_match_func(GtkEntryCompletion *completion, const gch
       char *casefold = g_utf8_casefold(normalized, -1);
       if(casefold)
       {
-        res = g_strstr_len(casefold, -1, key) != NULL;
+        res = g_strstr_len(casefold, -1, lastTag) != NULL;
       }
       g_free(casefold);
     }
@@ -739,6 +815,7 @@ static gboolean _lib_tagging_tag_show(GtkAccelGroup *accel_group, GObject *accel
   gtk_entry_completion_set_text_column(completion, 0);
   gtk_entry_completion_set_inline_completion(completion, TRUE);
   gtk_entry_completion_set_popup_set_width(completion, FALSE);
+  g_signal_connect(G_OBJECT(completion), "match-selected", G_CALLBACK(_match_selected_func), self);
   gtk_entry_completion_set_match_func(completion, _completion_match_func, NULL, NULL);
   gtk_entry_set_completion(GTK_ENTRY(entry), completion);
 

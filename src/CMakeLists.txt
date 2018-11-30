@@ -1,5 +1,8 @@
 add_subdirectory(external)
 
+CHECK_COMPILER_FLAG_AND_ENABLE_IT(-fno-strict-aliasing)
+# do not set it for the external libraries.
+
 include(CheckCCompilerFlag)
 include(CheckCXXCompilerFlag)
 include(CheckCSourceCompiles)
@@ -29,6 +32,7 @@ FILE(GLOB SOURCE_FILES
   "common/fswatch.c"
   "common/gaussian.c"
   "common/grouping.c"
+  "common/guided_filter.c"
   "common/history.c"
   "common/gpx.c"
   "common/image.c"
@@ -69,6 +73,8 @@ FILE(GLOB SOURCE_FILES
   "common/resource_limits.c"
   "common/histogram.c"
   "common/undo.c"
+  "common/usermanual_url.c"
+  "common/iop_group.c"
   "control/control.c"
   "control/crawler.c"
   "control/jobs.c"
@@ -107,6 +113,7 @@ FILE(GLOB SOURCE_FILES
   "gui/preferences.c"
   "gui/presets.c"
   "gui/styles_dialog.c"
+  "gui/color_picker_proxy.c"
   "libs/lib.c"
   "views/view.c"
   )
@@ -430,7 +437,8 @@ if(GPHOTO2_FOUND)
   # CPack ignores variables you define in your CMakeLists.txt file,
   # and only variables ${CPACK_*} are correctly used.
   # so this needs to be saved by adding another variable with a name beginning with CPACK
-  set( CPACK_NSIS_GPHOTO2_VERSION ${GPHOTO2_VERSION_STRING} CACHE STRING "GPHOT2 version string")
+  set( CPACK_NSIS_GPHOTO2_VERSION ${GPHOTO2_VERSION_STRING} CACHE STRING "GPHOTO2 version string")
+  set( CPACK_NSIS_GRAPHICSMAGICK_VERSION ${GraphicsMagick_PKGCONF_VERSION} CACHE STRING "GM version string")
 endif(GPHOTO2_FOUND)
 
 # Check for __builtin_cpu_supports here due to a bug in clang/llvm. LLVM uses
@@ -837,6 +845,17 @@ if (WIN32)
   set_target_properties(darktable PROPERTIES LINK_FLAGS "-mconsole -mwindows -Wl,-subsystem,console")
   _detach_debuginfo (darktable bin)
   _detach_debuginfo (lib_darktable bin)
+else()
+    # Note that $ORIGIN is not a variable but has a special meaning at runtime.
+    # The string "$ORIGIN" should end up in the executable as-is.
+    set(RPATH_DT "$ORIGIN")
+    if (APPLE)
+        # The string "@loader_path" should end up in the executable as-is.
+        set(RPATH_DT "@loader_path")
+    endif()
+    set_target_properties(darktable
+                          PROPERTIES
+                          INSTALL_RPATH ${RPATH_DT}/../${CMAKE_INSTALL_LIBDIR}/darktable)
 endif(WIN32)
 
 install(TARGETS darktable DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT DTApplication)

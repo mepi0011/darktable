@@ -333,54 +333,6 @@ static int dt_ellipse_get_points(dt_develop_t *dev, float xx, float yy, float ra
   return 0;
 }
 
-// set the initial source position value for a clone mask
-static void dt_ellipse_set_source_pos_initial_value(dt_masks_form_gui_t *gui, dt_masks_form_t *form,
-                                                    dt_masks_point_ellipse_t *ellipse)
-{
-  // if this is the first time the relative pos is used
-  if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE_TEMP)
-  {
-    // if is has not been defined by the user, set some default
-    if(gui->posx_source == -1.f && gui->posy_source == -1.f)
-    {
-      form->source[0] = ellipse->center[0] + ellipse->radius[0];
-      form->source[1] = ellipse->center[1] - ellipse->radius[1];
-    }
-    else
-    {
-      // if a position was defined by the user, use the absolute value the first time
-      float pts_src[2] = { gui->posx_source, gui->posy_source };
-      dt_dev_distort_backtransform(darktable.develop, pts_src, 1);
-
-      form->source[0] = pts_src[0] / darktable.develop->preview_pipe->iwidth;
-      form->source[1] = pts_src[1] / darktable.develop->preview_pipe->iheight;
-    }
-
-    // save the relative value for the next time
-    gui->posx_source = form->source[0] - ellipse->center[0];
-    gui->posy_source = form->source[1] - ellipse->center[1];
-
-    gui->source_pos_type = DT_MASKS_SOURCE_POS_RELATIVE;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
-  {
-    // original pos was already defined and relative value calculated, just use it
-    form->source[0] = ellipse->center[0] + gui->posx_source;
-    form->source[1] = ellipse->center[1] + gui->posy_source;
-  }
-  else if(gui->source_pos_type == DT_MASKS_SOURCE_POS_ABSOLUTE)
-  {
-    // an absolute position was defined by the user
-    float pts_src[2] = { gui->posx_source, gui->posy_source };
-    dt_dev_distort_backtransform(darktable.develop, pts_src, 1);
-
-    form->source[0] = pts_src[0] / darktable.develop->preview_pipe->iwidth;
-    form->source[1] = pts_src[1] / darktable.develop->preview_pipe->iheight;
-  }
-  else
-    fprintf(stderr, "unknown source position type\n");
-}
-
 static int dt_ellipse_events_mouse_scrolled(struct dt_iop_module_t *module, float pzx, float pzy, int up,
                                             uint32_t state, dt_masks_form_t *form, int parentid,
                                             dt_masks_form_gui_t *gui, int index)
@@ -522,7 +474,8 @@ static int dt_ellipse_events_mouse_scrolled(struct dt_iop_module_t *module, floa
         else
           dt_conf_set_float("plugins/darkroom/masks/ellipse/rotation", ellipse->rotation);
       }
-      else if(gui->border_selected || (state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
+      // resize don't care where the mouse is inside a shape
+      if((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)
       {
         const float reference = (ellipse->flags & DT_MASKS_ELLIPSE_PROPORTIONAL ? 1.0f/fmin(ellipse->radius[0], ellipse->radius[1]) : 1.0f);
         if(up && ellipse->border > 0.001f * reference)
@@ -637,7 +590,9 @@ static int dt_ellipse_events_button_pressed(struct dt_iop_module_t *module, floa
     dt_control_queue_redraw_center();
     return 1;
   }
-  else if(gui->creation && (state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)))
+  else if(gui->creation && which == 1
+          && (((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))
+              || ((state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK)))
   {
     // set some absolute or relative position for the source of the clone mask
     if(form->type & DT_MASKS_CLONE) dt_masks_set_source_pos_initial_state(gui, state, pzx, pzy);
@@ -675,7 +630,7 @@ static int dt_ellipse_events_button_pressed(struct dt_iop_module_t *module, floa
       ellipse->border = MAX(0.005f * reference, MIN(0.5f * reference, ellipse_border));
       if(form->type & DT_MASKS_CLONE)
       {
-        dt_ellipse_set_source_pos_initial_value(gui, form, ellipse);
+        dt_masks_set_source_pos_initial_value(gui, DT_MASKS_ELLIPSE, form, pzx, pzy);
       }
       else
       {

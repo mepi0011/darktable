@@ -275,12 +275,16 @@ int dt_masks_legacy_params(dt_develop_t *dev, void *params, const int old_versio
 
 /** we create a completely new form. */
 dt_masks_form_t *dt_masks_create(dt_masks_type_t type);
-/** retrieve a form with is id */
+/** returns a form with formid == id from a list of forms */
+dt_masks_form_t *dt_masks_get_from_id_ext(GList *forms, int id);
+/** returns a form with formid == id from dev->forms */
 dt_masks_form_t *dt_masks_get_from_id(dt_develop_t *dev, int id);
 
 /** read the forms from the db */
+void dt_masks_read_forms_ext(dt_develop_t *dev, const int imgid, gboolean no_image);
 void dt_masks_read_forms(dt_develop_t *dev);
 /** write the forms into the db */
+void dt_masks_write_forms_ext(dt_develop_t *dev, const int imgid, gboolean undo);
 void dt_masks_write_form(dt_masks_form_t *form, dt_develop_t *dev);
 void dt_masks_write_forms(dt_develop_t *dev);
 void dt_masks_free_form(dt_masks_form_t *form);
@@ -328,6 +332,8 @@ void dt_masks_form_remove(struct dt_iop_module_t *module, dt_masks_form_t *grp, 
 void dt_masks_form_change_opacity(dt_masks_form_t *form, int parentid, int up);
 void dt_masks_form_move(dt_masks_form_t *grp, int formid, int up);
 int dt_masks_form_duplicate(dt_develop_t *dev, int formid);
+/* duplicate the list of forms, replace item in the list with form with the same formid */
+GList *dt_masks_dup_forms_deep(GList *forms, dt_masks_form_t *form);
 
 /** utils functions */
 int dt_masks_point_in_form_exact(float x, float y, float *points, int points_start, int points_count);
@@ -340,6 +346,8 @@ void dt_masks_select_form(struct dt_iop_module_t *module, dt_masks_form_t *sel);
 void dt_masks_draw_clone_source_pos(cairo_t *cr, const float zoom_scale, const float x, const float y);
 void dt_masks_set_source_pos_initial_state(dt_masks_form_gui_t *gui, const uint32_t state, const float pzx,
                                            const float pzy);
+void dt_masks_set_source_pos_initial_value(dt_masks_form_gui_t *gui, const int mask_type, dt_masks_form_t *form,
+                                                   const float pzx, const float pzy);
 void dt_masks_calculate_source_pos_value(dt_masks_form_gui_t *gui, const int mask_type, const float initial_xpos,
                                          const float initial_ypos, const float xpos, const float ypos, float *px,
                                          float *py, const int adding);

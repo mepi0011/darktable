@@ -26,6 +26,7 @@
 #include "develop/tiling.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -64,6 +65,7 @@ static void adjust_aabb(const float *p, float *aabb)
   aabb[3] = fmaxf(aabb[3], p[1]);
 }
 
+
 const char *name()
 {
   return C_("modulename", "rotate pixels");
@@ -76,7 +78,7 @@ int flags()
 
 int groups()
 {
-  return IOP_GROUP_CORRECT;
+  return dt_iop_get_group("rotate pixels", IOP_GROUP_CORRECT);
 }
 
 int operation_tags()
@@ -341,7 +343,7 @@ void init(dt_iop_module_t *self)
   self->default_params = calloc(1, sizeof(dt_iop_rotatepixels_params_t));
   self->params_size = sizeof(dt_iop_rotatepixels_params_t);
   self->gui_data = NULL;
-  self->priority = 235; // module order created by iop_dependencies.py, do not edit!
+  self->priority = 242; // module order created by iop_dependencies.py, do not edit!
 }
 
 void cleanup(dt_iop_module_t *self)
@@ -354,6 +356,7 @@ void gui_init(dt_iop_module_t *self)
 {
   self->widget = gtk_label_new("");
   gtk_widget_set_halign(self->widget, GTK_ALIGN_START);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
 }
 
 void gui_cleanup(dt_iop_module_t *self)

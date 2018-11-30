@@ -35,6 +35,7 @@
 #include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 #define CLIP(x) ((x < 0) ? 0.0 : (x > 1.0) ? 1.0 : x)
 
@@ -82,6 +83,7 @@ typedef struct dt_iop_relight_global_data_t
   int kernel_relight;
 } dt_iop_relight_global_data_t;
 
+
 const char *name()
 {
   return _("fill light");
@@ -94,7 +96,7 @@ int flags()
 
 int groups()
 {
-  return IOP_GROUP_TONE;
+  return dt_iop_get_group("fill light", IOP_GROUP_TONE);
 }
 
 void init_key_accels(dt_iop_module_so_t *self)
@@ -281,6 +283,13 @@ void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev
   piece->data = NULL;
 }
 
+void gui_reset(struct dt_iop_module_t *self)
+{
+  dt_iop_relight_gui_data_t *g = (dt_iop_relight_gui_data_t *)self->gui_data;
+  self->request_color_pick = DT_REQUEST_COLORPICK_OFF;
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->tbutton1), 0);
+}
+
 void gui_update(struct dt_iop_module_t *self)
 {
   dt_iop_module_t *module = (dt_iop_module_t *)self;
@@ -290,6 +299,9 @@ void gui_update(struct dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->scale1, p->ev);
   dt_bauhaus_slider_set(g->scale2, p->width);
   dtgtk_gradient_slider_set_value(g->gslider1, p->center);
+
+  if (self->request_color_pick == DT_REQUEST_COLORPICK_OFF)
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->tbutton1), 0);
 }
 
 void init(dt_iop_module_t *module)
@@ -297,7 +309,7 @@ void init(dt_iop_module_t *module)
   module->params = calloc(1, sizeof(dt_iop_relight_params_t));
   module->default_params = calloc(1, sizeof(dt_iop_relight_params_t));
   module->default_enabled = 0;
-  module->priority = 705; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 714; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_relight_params_t);
   module->gui_data = NULL;
   dt_iop_relight_params_t tmp = (dt_iop_relight_params_t){ 0.33, 0, 4 };
@@ -345,6 +357,7 @@ void gui_init(struct dt_iop_module_t *self)
   dt_iop_relight_params_t *p = (dt_iop_relight_params_t *)self->params;
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
 
   g_signal_connect(G_OBJECT(self->widget), "draw", G_CALLBACK(draw), self);
 

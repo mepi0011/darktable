@@ -23,9 +23,14 @@
 #include "develop/imageop_math.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 #include <gtk/gtk.h>
 #include <stdlib.h>
+
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt
@@ -50,6 +55,7 @@ typedef struct dt_iop_cacorrect_global_data_t
 {
 } dt_iop_cacorrect_global_data_t;
 
+
 // this returns a translatable name
 const char *name()
 {
@@ -59,7 +65,7 @@ const char *name()
 
 int groups()
 {
-  return IOP_GROUP_CORRECT;
+  return dt_iop_get_group("chromatic aberrations", IOP_GROUP_CORRECT);
 }
 
 int flags()
@@ -1289,11 +1295,22 @@ static void CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *pie
             // some parameters for the bilinear interpolation
             shiftvfloor[c] = floor((float)lblockshifts[c >> 1][0]);
             shiftvceil[c] = ceil((float)lblockshifts[c >> 1][0]);
-            shiftvfrac[c] = lblockshifts[c >> 1][0] - shiftvfloor[c];
+            if (lblockshifts[c>>1][0] < 0.f) {
+              float tmp = shiftvfloor[c];
+              shiftvfloor[c] = shiftvceil[c];
+              shiftvceil[c] = tmp;
+            }
+            shiftvfrac[c] = fabsf(lblockshifts[c>>1][0] - shiftvfloor[c]);
 
             shifthfloor[c] = floor((float)lblockshifts[c >> 1][1]);
             shifthceil[c] = ceil((float)lblockshifts[c >> 1][1]);
-            shifthfrac[c] = lblockshifts[c >> 1][1] - shifthfloor[c];
+            if (lblockshifts[c>>1][1] < 0.f) {
+              float tmp = shifthfloor[c];
+              shifthfloor[c] = shifthceil[c];
+              shifthceil[c] = tmp;
+            }
+            shifthfrac[c] = fabsf(lblockshifts[c>>1][1] - shifthfloor[c]);
+
 
             GRBdir[0][c] = lblockshifts[c >> 1][0] > 0 ? 2 : -2;
             GRBdir[1][c] = lblockshifts[c >> 1][1] > 0 ? 2 : -2;
@@ -1518,7 +1535,7 @@ void init(dt_iop_module_t *module)
   module->default_enabled = 0;
 
   // we come just before demosaicing.
-  module->priority = 73; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 71; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_cacorrect_params_t);
   module->gui_data = NULL;
 }
@@ -1571,6 +1588,7 @@ void gui_init(dt_iop_module_t *self)
   self->gui_data = NULL;
   self->widget = gtk_label_new("");
   gtk_widget_set_halign(self->widget, GTK_ALIGN_START);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
 }
 
 void gui_cleanup(dt_iop_module_t *self)

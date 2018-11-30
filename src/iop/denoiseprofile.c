@@ -19,18 +19,20 @@
 #include "config.h"
 #endif
 #include "bauhaus/bauhaus.h"
+#include "common/exif.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
-#include "common/exif.h"
 #include "control/control.h"
 #include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/tiling.h"
+#include "dtgtk/drawingarea.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 #include <gtk/gtk.h>
 #include <math.h>
@@ -40,8 +42,11 @@
 #endif
 
 #define REDUCESIZE 64
-#define MAX_PROFILES 30
 #define NUM_BUCKETS 4
+
+#define DT_IOP_DENOISE_PROFILE_INSET DT_PIXEL_APPLY_DPI(5)
+#define DT_IOP_DENOISE_PROFILE_RES 64
+#define DT_IOP_DENOISE_PROFILE_BANDS 5
 
 typedef enum dt_iop_denoiseprofile_mode_t
 {
@@ -49,16 +54,46 @@ typedef enum dt_iop_denoiseprofile_mode_t
   MODE_WAVELETS = 1
 } dt_iop_denoiseprofile_mode_t;
 
+typedef enum dt_iop_denoiseprofile_channel_t
+{
+  DT_DENOISE_PROFILE_ALL = 0,
+  DT_DENOISE_PROFILE_R = 1,
+  DT_DENOISE_PROFILE_G = 2,
+  DT_DENOISE_PROFILE_B = 3,
+  DT_DENOISE_PROFILE_NONE = 4
+} dt_iop_denoiseprofile_channel_t;
+
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt
-DT_MODULE_INTROSPECTION(3, dt_iop_denoiseprofile_params_t)
+DT_MODULE_INTROSPECTION(5, dt_iop_denoiseprofile_params_t)
 
-typedef struct dt_iop_denoiseprofile_params_t
+typedef struct dt_iop_denoiseprofile_params_v1_t
 {
   float radius;     // search radius
   float strength;   // noise level after equalization
   float a[3], b[3]; // fit for poissonian-gaussian noise per color channel.
   dt_iop_denoiseprofile_mode_t mode; // switch between nlmeans and wavelets
+} dt_iop_denoiseprofile_params_v1_t;
+
+typedef struct dt_iop_denoiseprofile_params_v4_t
+{
+  float radius;     // search radius
+  float strength;   // noise level after equalization
+  float a[3], b[3]; // fit for poissonian-gaussian noise per color channel.
+  dt_iop_denoiseprofile_mode_t mode; // switch between nlmeans and wavelets
+  float x[DT_DENOISE_PROFILE_NONE][DT_IOP_DENOISE_PROFILE_BANDS];
+  float y[DT_DENOISE_PROFILE_NONE][DT_IOP_DENOISE_PROFILE_BANDS]; // values to change wavelet force by frequency
+} dt_iop_denoiseprofile_params_v4_t;
+
+typedef struct dt_iop_denoiseprofile_params_t
+{
+  float radius;     // patch size
+  float nbhood;     // search radius
+  float strength;   // noise level after equalization
+  float a[3], b[3]; // fit for poissonian-gaussian noise per color channel.
+  dt_iop_denoiseprofile_mode_t mode; // switch between nlmeans and wavelets
+  float x[DT_DENOISE_PROFILE_NONE][DT_IOP_DENOISE_PROFILE_BANDS];
+  float y[DT_DENOISE_PROFILE_NONE][DT_IOP_DENOISE_PROFILE_BANDS]; // values to change wavelet force by frequency
 } dt_iop_denoiseprofile_params_t;
 
 typedef struct dt_iop_denoiseprofile_gui_data_t
@@ -66,12 +101,38 @@ typedef struct dt_iop_denoiseprofile_gui_data_t
   GtkWidget *profile;
   GtkWidget *mode;
   GtkWidget *radius;
+  GtkWidget *nbhood;
   GtkWidget *strength;
   dt_noiseprofile_t interpolated; // don't use name, maker or model, they may point to garbage
   GList *profiles;
+  GtkWidget *stack;
+  GtkWidget *box_nlm;
+  GtkWidget *box_wavelets;
+  dt_draw_curve_t *transition_curve; // curve for gui to draw
+  GtkDrawingArea *area;
+  GtkNotebook *channel_tabs;
+  double mouse_x, mouse_y, mouse_pick;
+  float mouse_radius;
+  dt_iop_denoiseprofile_params_t drag_params;
+  int dragging;
+  int x_move;
+  dt_iop_denoiseprofile_channel_t channel;
+  float draw_xs[DT_IOP_DENOISE_PROFILE_RES], draw_ys[DT_IOP_DENOISE_PROFILE_RES];
+  float draw_min_xs[DT_IOP_DENOISE_PROFILE_RES], draw_min_ys[DT_IOP_DENOISE_PROFILE_RES];
+  float draw_max_xs[DT_IOP_DENOISE_PROFILE_RES], draw_max_ys[DT_IOP_DENOISE_PROFILE_RES];
 } dt_iop_denoiseprofile_gui_data_t;
 
-typedef dt_iop_denoiseprofile_params_t dt_iop_denoiseprofile_data_t;
+typedef struct dt_iop_denoiseprofile_data_t
+{
+  float radius;                      // search radius
+  float nbhood;                      // search radius
+  float strength;                    // noise level after equalization
+  float a[3], b[3];                  // fit for poissonian-gaussian noise per color channel.
+  dt_iop_denoiseprofile_mode_t mode; // switch between nlmeans and wavelets
+  dt_draw_curve_t *curve[DT_DENOISE_PROFILE_NONE];
+  dt_iop_denoiseprofile_channel_t channel;
+  float force[DT_DENOISE_PROFILE_NONE][DT_IOP_DENOISE_PROFILE_BANDS];
+} dt_iop_denoiseprofile_data_t;
 
 typedef struct dt_iop_denoiseprofile_global_data_t
 {
@@ -94,19 +155,30 @@ static dt_noiseprofile_t dt_iop_denoiseprofile_get_auto_profile(dt_iop_module_t 
 int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,
                   void *new_params, const int new_version)
 {
-  if((old_version == 1 || old_version == 2) && new_version == 3)
+  if((old_version == 1 || old_version == 2 || old_version == 3) && new_version == 4)
   {
-    dt_iop_denoiseprofile_params_t *o = (dt_iop_denoiseprofile_params_t *)old_params;
-    dt_iop_denoiseprofile_params_t *n = (dt_iop_denoiseprofile_params_t *)new_params;
+    const dt_iop_denoiseprofile_params_v1_t *o = old_params;
+    dt_iop_denoiseprofile_params_v4_t *n = new_params;
     if(old_version == 1)
     {
-      // one more parameter and changed parameters in case we autodetected a profile
-      memcpy(n, o, sizeof(dt_iop_denoiseprofile_params_t) - sizeof(uint32_t));
       n->mode = MODE_NLMEANS;
     }
     else
     {
-      memcpy(n, o, sizeof(dt_iop_denoiseprofile_params_t));
+      n->mode = o->mode;
+    }
+    n->radius = o->radius;
+    n->strength = o->strength;
+    memcpy(n->a, o->a, sizeof(float) * 3);
+    memcpy(n->b, o->b, sizeof(float) * 3);
+    // init curves coordinates
+    for(int b = 0; b < DT_IOP_DENOISE_PROFILE_BANDS; b++)
+    {
+      for(int c = 0; c < DT_DENOISE_PROFILE_NONE; c++)
+      {
+        n->x[c][b] = b / (DT_IOP_DENOISE_PROFILE_BANDS - 1.0f);
+        n->y[c][b] = 0.5f;
+      }
     }
     // autodetect current profile:
     if(!self->dev)
@@ -125,12 +197,41 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
     if(!memcmp(interpolated.a, o->a, sizeof(float) * 3) && !memcmp(interpolated.b, o->b, sizeof(float) * 3))
     {
       // set the param a[0] to -1.0 to signal the autodetection
-      n->a[0] = -1.0;
+      n->a[0] = -1.0f;
     }
+    return 0;
+  }
+  else if(new_version == 5)
+  {
+    dt_iop_denoiseprofile_params_v4_t v4;
+    int err = 0;
+    if(old_version < 4) // first update to v4
+      err = legacy_params(self, old_params, old_version, &v4, 4);
+    else memcpy(&v4, old_params, sizeof(v4)); // was v4 already
+    if(err) return 1;
+    dt_iop_denoiseprofile_params_t *v5 = new_params;
+    v5->radius = v4.radius;
+    v5->strength = v4.strength;
+    v5->mode = v4.mode;
+    for(int k=0;k<3;k++)
+    {
+      v5->a[k] = v4.a[k];
+      v5->b[k] = v4.b[k];
+    }
+    for(int b = 0; b < DT_IOP_DENOISE_PROFILE_BANDS; b++)
+    {
+      for(int c = 0; c < DT_DENOISE_PROFILE_NONE; c++)
+      {
+        v5->x[c][b] = v4.x[c][b];
+        v5->y[c][b] = v4.y[c][b];
+      }
+    }
+    v5->nbhood = 7; // set to old hardcoded default
     return 0;
   }
   return 1;
 }
+
 
 const char *name()
 {
@@ -139,19 +240,23 @@ const char *name()
 
 int groups()
 {
-  return IOP_GROUP_CORRECT;
+  return dt_iop_get_group("denoise (profiled)", IOP_GROUP_CORRECT);
 }
+
+#undef NAME
 
 int flags()
 {
   return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
 }
 
-static void add_preset(dt_iop_module_so_t *self, const char *name, const char *pi, const char *bpi, const int blendop_version)
+static void add_preset(
+    dt_iop_module_so_t *self, const char *name,
+    const char *pi,  const int version,
+    const char *bpi, const int blendop_version)
 {
   int len, blen;
   uint8_t *p  = dt_exif_xmp_decode(pi, strlen(pi), &len);
-  assert(len == sizeof(dt_iop_denoiseprofile_params_t));
   uint8_t *bp = dt_exif_xmp_decode(bpi, strlen(bpi), &blen);
   if(blendop_version != dt_develop_blend_version())
   {
@@ -174,8 +279,7 @@ static void add_preset(dt_iop_module_so_t *self, const char *name, const char *p
   }
 
   if(p && bp)
-    dt_gui_presets_add_with_blendop(name, self->op, self->version(),
-                                    p, len, bp, 1);
+    dt_gui_presets_add_with_blendop(name, self->op, version, p, len, bp, 1);
   free(bp);
   free(p);
 }
@@ -183,14 +287,12 @@ static void add_preset(dt_iop_module_so_t *self, const char *name, const char *p
 void init_presets(dt_iop_module_so_t *self)
 {
   // these blobs were exported as dtstyle and copied from there:
-  add_preset(self,
-             _("chroma (use on 1st instance)"),
-             "0000803f0000803f000080bf05a32a3636106236c01b58341f1609b446faddb301000000",
+  add_preset(self, _("chroma (use on 1st instance)"),
+             "gz03eJxjYGiwZ2B44MAAphv2b4vdb1mnYGTFLcZomryXxzRr910TRgYYaLADEkB1DvYQ9eSLiUf9s+te/s/OjJPV/sA7Y3vZI/X2EHnyMAB8fx/c", 5,
              "gz12eJxjZGBgEGYAgRNODESDBnsIHll8AM62GP8=", 7);
-  add_preset(self,
-             _("luma (use on 2nd instance)"),
-             "000080400000003f000080bf38c54438c0d7b83828ff8934230e0c344a216d3400000000",
-             "gz12eJxjZGBgEGAAgWlODESDBnsIHll8AJKaGMo=", 7);
+  add_preset(self, _("luma (use on 2nd instance)"),
+             "gz03eJxjYGiwZ2B44DBr5kw7BoaG/X6WAZbuc/dZXtJTNU3keG4SnmltysgAAw1ANQxA9Q5ADNJHvpjfgz+2J1S17X6XL7QzzP5hV9i6FCpPHgYA0YsieQ==", 5,
+             "gz12eJxjZGBgEGAAgR4nBqJBgz0Ejyw+AIdGGMA=", 7);
 }
 
 typedef union floatint_t
@@ -218,9 +320,8 @@ void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t
 
   if(d->mode == MODE_NLMEANS)
   {
-    const int P
-        = ceilf(d->radius * fmin(roi_in->scale, 2.0f) / fmax(piece->iscale, 1.0f)); // pixel filter size
-    const int K = ceilf(7 * fmin(roi_in->scale, 2.0f) / fmax(piece->iscale, 1.0f)); // nbhood
+    const int P = ceilf(d->radius * fminf(roi_in->scale, 2.0f) / fmaxf(piece->iscale, 1.0f)); // pixel filter size
+    const int K = ceilf(d->nbhood * fminf(roi_in->scale, 2.0f) / fmaxf(piece->iscale, 1.0f)); // nbhood
 
     tiling->factor = 4.0f + 0.25f * NUM_BUCKETS; // in + out + (2 + NUM_BUCKETS * 0.25) tmp
     tiling->maxbuf = 1.0f;
@@ -236,13 +337,13 @@ void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t
     const float scale = roi_in->scale / piece->iscale;
     // largest desired filter on input buffer (20% of input dim)
     const float supp0
-        = MIN(2 * (2 << (max_max_scale - 1)) + 1,
-              MAX(piece->buf_in.height * piece->iscale, piece->buf_in.width * piece->iscale) * 0.2f);
+        = fminf(2 * (2u << (max_max_scale - 1)) + 1,
+              fmaxf(piece->buf_in.height * piece->iscale, piece->buf_in.width * piece->iscale) * 0.2f);
     const float i0 = dt_log2f((supp0 - 1.0f) * .5f);
     for(; max_scale < max_max_scale; max_scale++)
     {
       // actual filter support on scaled buffer
-      const float supp = 2 * (2 << max_scale) + 1;
+      const float supp = 2 * (2u << max_scale) + 1;
       // approximates this filter size on unscaled input image:
       const float supp_in = supp * (1.0f / scale);
       const float i_in = dt_log2f((supp_in - 1) * .5f) - 1.0f;
@@ -251,7 +352,7 @@ void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t
       if(t < 0.0f) break;
     }
 
-    const int max_filter_radius = (1 << max_scale); // 2 * 2^max_scale
+    const int max_filter_radius = (1u << max_scale); // 2 * 2^max_scale
 
     tiling->factor = 3.5f + max_scale; // in + out + tmp + reducebuffer + scale buffers
     tiling->maxbuf = 1.0f;
@@ -261,16 +362,15 @@ void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t
     tiling->yalign = 1;
   }
 
-  return;
 }
 
 static inline void precondition(const float *const in, float *const buf, const int wd, const int ht,
                                 const float a[3], const float b[3])
 {
-  const float sigma2[3]
-      = { (b[0] / a[0]) * (b[0] / a[0]),
-          (b[1] / a[1]) * (b[1] / a[1]),
-          (b[2] / a[2]) * (b[2] / a[2]) };
+  const float sigma2_plus_3_8[3]
+      = { (b[0] / a[0]) * (b[0] / a[0]) + 3.f / 8.f,
+          (b[1] / a[1]) * (b[1] / a[1]) + 3.f / 8.f,
+          (b[2] / a[2]) * (b[2] / a[2]) + 3.f / 8.f };
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) default(none) shared(a)
@@ -283,9 +383,8 @@ static inline void precondition(const float *const in, float *const buf, const i
     {
       for(int c = 0; c < 3; c++)
       {
-        buf2[c] = in2[c] / a[c];
-        const float d = fmaxf(0.0f, buf2[c] + 3. / 8. + sigma2[c]);
-        buf2[c] = 2.0f * sqrtf(d);
+        const float d = fmaxf(0.0f, in2[c] / a[c] + sigma2_plus_3_8[c]);
+        buf2[c] = d > 0.0f ? 2.0f * sqrtf(d) : 0.0f;
       }
       buf2 += 4;
       in2 += 4;
@@ -296,10 +395,10 @@ static inline void precondition(const float *const in, float *const buf, const i
 static inline void backtransform(float *const buf, const int wd, const int ht, const float a[3],
                                  const float b[3])
 {
-  const float sigma2[3]
-      = { (b[0] / a[0]) * (b[0] / a[0]),
-          (b[1] / a[1]) * (b[1] / a[1]),
-          (b[2] / a[2]) * (b[2] / a[2]) };
+  const float sigma2_plus_1_8[3]
+      = { (b[0] / a[0]) * (b[0] / a[0]) + 1.f / 8.f,
+          (b[1] / a[1]) * (b[1] / a[1]) + 1.f / 8.f,
+          (b[2] / a[2]) * (b[2] / a[2]) + 1.f / 8.f };
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) default(none) shared(a)
@@ -311,13 +410,13 @@ static inline void backtransform(float *const buf, const int wd, const int ht, c
     {
       for(int c = 0; c < 3; c++)
       {
-        const float x = buf2[c];
+        const float x = buf2[c], x2 = x * x;
         // closed form approximation to unbiased inverse (input range was 0..200 for fit, not 0..1)
         if(x < .5f)
           buf2[c] = 0.0f;
         else
-          buf2[c] = 1. / 4. * x * x + 1. / 4. * sqrtf(3. / 2.) / x - 11. / 8. * 1.0 / (x * x)
-                    + 5. / 8. * sqrtf(3. / 2.) * 1.0 / (x * x * x) - 1. / 8. - sigma2[c];
+          buf2[c] = 1.f / 4.f * x2 + 1.f / 4.f * sqrtf(3.f / 2.f) / x - 11.f / 8.f / x2
+                    + 5.f / 8.f * sqrtf(3.f / 2.f) / (x * x2) - sigma2_plus_1_8[c];
         // asymptotic form:
         // buf2[c] = fmaxf(0.0f, 1./4.*x*x - 1./8. - sigma2[c]);
         buf2[c] *= a[c];
@@ -336,10 +435,10 @@ static inline float weight(const float *c1, const float *c2, const float inv_sig
 // return _mm_set1_ps(1.0f);
 #if 1
   // 3d distance based on color
-  float diff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  float diff[4];
   for(int c = 0; c < 4; c++) diff[c] = c1[c] - c2[c];
 
-  float sqr[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  float sqr[4];
   for(int c = 0; c < 4; c++) sqr[c] = diff[c] * diff[c];
 
   const float dot = (sqr[0] + sqr[1] + sqr[2]) * inv_sigma2;
@@ -374,7 +473,7 @@ static inline __m128 weight_sse(const __m128 *c1, const __m128 *c2, const float 
     const float f = filter[(ii)] * filter[(jj)];                                                             \
     const float wp = weight(px, px2, inv_sigma2);                                                            \
     const float w = f * wp;                                                                                  \
-    float pd[4] = { 0.0f, 0.0f, 0.0f, 0.0f };                                                                \
+    float pd[4];                                                                                             \
     for(int c = 0; c < 4; c++) pd[c] = w * px2[c];                                                           \
     for(int c = 0; c < 4; c++) sum[c] += pd[c];                                                              \
     for(int c = 0; c < 4; c++) wgt[c] += w;                                                                  \
@@ -481,7 +580,7 @@ typedef void((*eaw_decompose_t)(float *const out, const float *const in, float *
 static void eaw_decompose(float *const out, const float *const in, float *const detail, const int scale,
                           const float inv_sigma2, const int32_t width, const int32_t height)
 {
-  const int mult = 1 << scale;
+  const int mult = 1u << scale;
   static const float filter[5] = { 1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f };
 
 /* The first "2*mult" lines use the macro with tests because the 5x5 kernel
@@ -596,7 +695,7 @@ static void eaw_decompose(float *const out, const float *const in, float *const 
 static void eaw_decompose_sse(float *const out, const float *const in, float *const detail, const int scale,
                               const float inv_sigma2, const int32_t width, const int32_t height)
 {
-  const int mult = 1 << scale;
+  const int mult = 1u << scale;
   static const float filter[5] = { 1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f };
 
 /* The first "2*mult" lines use the macro with tests because the 5x5 kernel
@@ -780,20 +879,20 @@ static void process_wavelets(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_
 {
   // this is called for preview and full pipe separately, each with its own pixelpipe piece.
   // get our data struct:
-  dt_iop_denoiseprofile_params_t *d = (dt_iop_denoiseprofile_params_t *)piece->data;
+  dt_iop_denoiseprofile_data_t *d = (dt_iop_denoiseprofile_data_t *)piece->data;
 
-#define MAX_MAX_SCALE (5) // hard limit
+#define MAX_MAX_SCALE DT_IOP_DENOISE_PROFILE_BANDS // hard limit
 
   int max_scale = 0;
   const float in_scale = roi_in->scale / piece->iscale;
   // largest desired filter on input buffer (20% of input dim)
-  const float supp0 = MIN(2 * (2 << (MAX_MAX_SCALE - 1)) + 1,
+  const float supp0 = MIN(2 * (2u << (MAX_MAX_SCALE - 1)) + 1,
                           MAX(piece->buf_in.height * piece->iscale, piece->buf_in.width * piece->iscale) * 0.2f);
   const float i0 = dt_log2f((supp0 - 1.0f) * .5f);
   for(; max_scale < MAX_MAX_SCALE; max_scale++)
   {
     // actual filter support on scaled buffer
-    const float supp = 2 * (2 << max_scale) + 1;
+    const float supp = 2 * (2u << max_scale) + 1;
     // approximates this filter size on unscaled input image:
     const float supp_in = supp * (1.0f / in_scale);
     const float i_in = dt_log2f((supp_in - 1) * .5f) - 1.0f;
@@ -898,8 +997,37 @@ static void process_wavelets(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_
     const float std_x[3] = { sqrtf(MAX(1e-6f, var_y[0] - sb2)), sqrtf(MAX(1e-6f, var_y[1] - sb2)),
                              sqrtf(MAX(1e-6f, var_y[2] - sb2)) };
     // add 8.0 here because it seemed a little weak
-    const float adjt = 8.0f;
-    const float thrs[4] = { adjt * sb2 / std_x[0], adjt * sb2 / std_x[1], adjt * sb2 / std_x[2], 0.0f };
+    float adjt[3] = { 8.0f, 8.0f, 8.0f };
+
+    int offset_scale = DT_IOP_DENOISE_PROFILE_BANDS - max_scale;
+    // current scale number is scale+offset_scale
+    // for instance, largest scale is DT_IOP_DENOISE_PROFILE_BANDS
+    // max_scale only indicates the number of scales to process at THIS
+    // zoom level, it does NOT corresponds to the the maximum number of scales.
+    // in other words, max_scale is the maximum number of VISIBLE scales.
+    // That is why we have this "scale+offset_scale"
+    float band_force_exp_2
+        = d->force[DT_DENOISE_PROFILE_ALL][DT_IOP_DENOISE_PROFILE_BANDS - (scale + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    for(int ch = 0; ch < 3; ch++)
+    {
+      adjt[ch] *= band_force_exp_2;
+    }
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_R][DT_IOP_DENOISE_PROFILE_BANDS - (scale + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[0] *= band_force_exp_2;
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_G][DT_IOP_DENOISE_PROFILE_BANDS - (scale + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[1] *= band_force_exp_2;
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_B][DT_IOP_DENOISE_PROFILE_BANDS - (scale + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[2] *= band_force_exp_2;
+
+    const float thrs[4] = { adjt[0] * sb2 / std_x[0], adjt[1] * sb2 / std_x[1], adjt[2] * sb2 / std_x[2], 0.0f };
 // const float std = (std_x[0] + std_x[1] + std_x[2])/3.0f;
 // const float thrs[4] = { adjt*sigma*sigma/std, adjt*sigma*sigma/std, adjt*sigma*sigma/std, 0.0f};
 // fprintf(stderr, "scale %d thrs %f %f %f = %f / %f %f %f \n", scale, thrs[0], thrs[1], thrs[2], sb2,
@@ -932,15 +1060,15 @@ static void process_nlmeans(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t
 {
   // this is called for preview and full pipe separately, each with its own pixelpipe piece.
   // get our data struct:
-  const dt_iop_denoiseprofile_params_t *const d = (const dt_iop_denoiseprofile_params_t *const)piece->data;
+  const dt_iop_denoiseprofile_data_t *const d = piece->data;
 
   const int ch = piece->colors;
 
   // TODO: fixed K to use adaptive size trading variance and bias!
   // adjust to zoom size:
-  const float scale = fmin(roi_in->scale, 2.0f) / fmax(piece->iscale, 1.0f);
+  const float scale = fminf(roi_in->scale, 2.0f) / fmaxf(piece->iscale, 1.0f);
   const int P = ceilf(d->radius * scale); // pixel filter size
-  const int K = ceilf(7 * scale);         // nbhood
+  const int K = ceilf(d->nbhood * scale); // nbhood
 
   // P == 0 : this will degenerate to a (fast) bilateral filter.
 
@@ -1084,11 +1212,10 @@ static void process_nlmeans_sse(struct dt_iop_module_t *self, dt_dev_pixelpipe_i
   // get our data struct:
   dt_iop_denoiseprofile_params_t *d = (dt_iop_denoiseprofile_params_t *)piece->data;
 
-  // TODO: fixed K to use adaptive size trading variance and bias!
   // adjust to zoom size:
-  const float scale = fmin(roi_in->scale, 2.0f) / fmax(piece->iscale, 1.0f);
+  const float scale = fminf(roi_in->scale, 2.0f) / fmaxf(piece->iscale, 1.0f);
   const int P = ceilf(d->radius * scale); // pixel filter size
-  const int K = ceilf(7 * scale);         // nbhood
+  const int K = ceilf(d->nbhood * scale); // nbhood
 
   // P == 0 : this will degenerate to a (fast) bilateral filter.
 
@@ -1109,9 +1236,6 @@ static void process_nlmeans_sse(struct dt_iop_module_t *self, dt_dev_pixelpipe_i
   {
     for(int ki = -K; ki <= K; ki++)
     {
-      // TODO: adaptive K tests here!
-      // TODO: expf eval for real bilateral experience :)
-
       int inited_slide = 0;
 // don't construct summed area tables but use sliding window! (applies to cpu version res < 1k only, or else
 // we will add up errors)
@@ -1307,9 +1431,9 @@ static int process_nlmeans_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
 
   cl_int err = -999;
 
-  const float scale = fmin(roi_in->scale, 2.0f) / fmax(piece->iscale, 1.0f);
+  const float scale = fminf(roi_in->scale, 2.0f) / fmaxf(piece->iscale, 1.0f);
   const int P = ceilf(d->radius * scale); // pixel filter size
-  const int K = ceilf(7 * scale);         // nbhood
+  const int K = ceilf(d->nbhood * scale); // nbhood
   const float norm = 0.015f / (2 * P + 1);
 
 
@@ -1337,7 +1461,7 @@ static int process_nlmeans_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
   dt_opencl_local_buffer_t hlocopt
     = (dt_opencl_local_buffer_t){ .xoffset = 2 * P, .xfactor = 1, .yoffset = 0, .yfactor = 1,
                                   .cellsize = sizeof(float), .overhead = 0,
-                                  .sizex = 1 << 16, .sizey = 1 };
+                                  .sizex = 1u << 16, .sizey = 1 };
 
   if(dt_opencl_local_buffer_opt(devid, gd->kernel_denoiseprofile_horiz, &hlocopt))
     hblocksize = hlocopt.sizex;
@@ -1348,7 +1472,7 @@ static int process_nlmeans_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
   dt_opencl_local_buffer_t vlocopt
     = (dt_opencl_local_buffer_t){ .xoffset = 1, .xfactor = 1, .yoffset = 2 * P, .yfactor = 1,
                                   .cellsize = sizeof(float), .overhead = 0,
-                                  .sizex = 1, .sizey = 1 << 16 };
+                                  .sizex = 1, .sizey = 1u << 16 };
 
   if(dt_opencl_local_buffer_opt(devid, gd->kernel_denoiseprofile_vert, &vlocopt))
     vblocksize = vlocopt.sizey;
@@ -1487,18 +1611,18 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_io
   dt_iop_denoiseprofile_data_t *d = (dt_iop_denoiseprofile_data_t *)piece->data;
   dt_iop_denoiseprofile_global_data_t *gd = (dt_iop_denoiseprofile_global_data_t *)self->data;
 
-  const int max_max_scale = 5; // hard limit
+  const int max_max_scale = DT_IOP_DENOISE_PROFILE_BANDS; // hard limit
   int max_scale = 0;
   const float scale = roi_in->scale / piece->iscale;
   // largest desired filter on input buffer (20% of input dim)
   const float supp0
-      = MIN(2 * (2 << (max_max_scale - 1)) + 1,
+      = MIN(2 * (2u << (max_max_scale - 1)) + 1,
             MAX(piece->buf_in.height * piece->iscale, piece->buf_in.width * piece->iscale) * 0.2f);
   const float i0 = dt_log2f((supp0 - 1.0f) * .5f);
   for(; max_scale < max_max_scale; max_scale++)
   {
     // actual filter support on scaled buffer
-    const float supp = 2 * (2 << max_scale) + 1;
+    const float supp = 2 * (2u << max_scale) + 1;
     // approximates this filter size on unscaled input image:
     const float supp_in = supp * (1.0f / scale);
     const float i_in = dt_log2f((supp_in - 1) * .5f) - 1.0f;
@@ -1538,7 +1662,7 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_io
   dt_opencl_local_buffer_t flocopt
     = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,
                                   .cellsize = 4 * sizeof(float), .overhead = 0,
-                                  .sizex = 1 << 4, .sizey = 1 << 4 };
+                                  .sizex = 1u << 4, .sizey = 1u << 4 };
 
   if(!dt_opencl_local_buffer_opt(devid, gd->kernel_denoiseprofile_reduce_first, &flocopt))
     goto error;
@@ -1551,7 +1675,7 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_io
   dt_opencl_local_buffer_t slocopt
     = (dt_opencl_local_buffer_t){ .xoffset = 0, .xfactor = 1, .yoffset = 0, .yfactor = 1,
                                   .cellsize = 4 * sizeof(float), .overhead = 0,
-                                  .sizex = 1 << 16, .sizey = 1 };
+                                  .sizex = 1u << 16, .sizey = 1 };
 
   if(!dt_opencl_local_buffer_opt(devid, gd->kernel_denoiseprofile_reduce_first, &slocopt))
     goto error;
@@ -1705,9 +1829,36 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_io
     const float std_x[3] = { sqrtf(MAX(1e-6f, var_y[0] - sb2)), sqrtf(MAX(1e-6f, var_y[1] - sb2)),
                              sqrtf(MAX(1e-6f, var_y[2] - sb2)) };
     // add 8.0 here because it seemed a little weak
-    const float adjt = 8.0f;
+    float adjt[3] = { 8.0f, 8.0f, 8.0f };
 
-    const float thrs[4] = { adjt * sb2 / std_x[0], adjt * sb2 / std_x[1], adjt * sb2 / std_x[2], 0.0f };
+    int offset_scale = DT_IOP_DENOISE_PROFILE_BANDS - max_scale;
+    // current scale number is s+offset_scale
+    // for instance, largest scale is DT_IOP_DENOISE_PROFILE_BANDS
+    // max_scale only indicates the number of scales to process at THIS
+    // zoom level, it does NOT corresponds to the the maximum number of scales.
+    // in other words, max_scale is the maximum number of VISIBLE scales.
+    // That is why we have this "s+offset_scale"
+    float band_force_exp_2 = d->force[DT_DENOISE_PROFILE_ALL][DT_IOP_DENOISE_PROFILE_BANDS - (s + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    for(int ch = 0; ch < 3; ch++)
+    {
+      adjt[ch] *= band_force_exp_2;
+    }
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_R][DT_IOP_DENOISE_PROFILE_BANDS - (s + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[0] *= band_force_exp_2;
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_G][DT_IOP_DENOISE_PROFILE_BANDS - (s + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[1] *= band_force_exp_2;
+    band_force_exp_2 = d->force[DT_DENOISE_PROFILE_B][DT_IOP_DENOISE_PROFILE_BANDS - (s + offset_scale + 1)];
+    band_force_exp_2 *= band_force_exp_2;
+    band_force_exp_2 *= 4; // scale to [0,4]. 1 is the neutral curve point
+    adjt[2] *= band_force_exp_2;
+
+    const float thrs[4] = { adjt[0] * sb2 / std_x[0], adjt[1] * sb2 / std_x[1], adjt[2] * sb2 / std_x[2], 0.0f };
     // fprintf(stderr, "scale %d thrs %f %f %f\n", s, thrs[0], thrs[1], thrs[2]);
 
     const float boost[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -1858,7 +2009,7 @@ void reload_defaults(dt_iop_module_t *module)
       {
         g->interpolated = *current;
         // signal later autodetection in commit_params:
-        g->interpolated.a[0] = -1.0;
+        g->interpolated.a[0] = -1.0f;
         snprintf(name, sizeof(name), _("found match for ISO %d"), iso);
         break;
       }
@@ -1866,7 +2017,7 @@ void reload_defaults(dt_iop_module_t *module)
       {
         dt_noiseprofile_interpolate(last, current, &g->interpolated);
         // signal later autodetection in commit_params:
-        g->interpolated.a[0] = -1.0;
+        g->interpolated.a[0] = -1.0f;
         snprintf(name, sizeof(name), _("interpolated from ISO %d and %d"), last->iso, current->iso);
         break;
       }
@@ -1881,6 +2032,7 @@ void reload_defaults(dt_iop_module_t *module)
     }
 
     ((dt_iop_denoiseprofile_params_t *)module->default_params)->radius = 1.0f;
+    ((dt_iop_denoiseprofile_params_t *)module->default_params)->nbhood = 7.0f;
     ((dt_iop_denoiseprofile_params_t *)module->default_params)->strength = 1.0f;
     ((dt_iop_denoiseprofile_params_t *)module->default_params)->mode = MODE_NLMEANS;
     for(int k = 0; k < 3; k++)
@@ -1897,10 +2049,22 @@ void init(dt_iop_module_t *module)
 {
   module->params = calloc(1, sizeof(dt_iop_denoiseprofile_params_t));
   module->default_params = calloc(1, sizeof(dt_iop_denoiseprofile_params_t));
-  module->priority = 132; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 128; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_denoiseprofile_params_t);
   module->gui_data = NULL;
   module->data = NULL;
+  dt_iop_denoiseprofile_params_t tmp;
+  memset(&tmp, 0, sizeof(dt_iop_denoiseprofile_params_t));
+  for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+  {
+    for(int ch = 0; ch < DT_DENOISE_PROFILE_NONE; ch++)
+    {
+      tmp.x[ch][k] = k / (DT_IOP_DENOISE_PROFILE_BANDS - 1.f);
+      tmp.y[ch][k] = 0.5f;
+    }
+  }
+  memcpy(module->params, &tmp, sizeof(dt_iop_denoiseprofile_params_t));
+  memcpy(module->default_params, &tmp, sizeof(dt_iop_denoiseprofile_params_t));
 }
 
 void cleanup(dt_iop_module_t *module)
@@ -1981,8 +2145,15 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev
   dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)params;
   dt_iop_denoiseprofile_data_t *d = (dt_iop_denoiseprofile_data_t *)piece->data;
 
-  // copy everything first and make some changes later
-  memcpy(d, p, sizeof(*d));
+  d->radius = p->radius;
+  d->nbhood = p->nbhood;
+  d->strength = p->strength;
+  for(int i = 0; i < 3; i++)
+  {
+    d->a[i] = p->a[i];
+    d->b[i] = p->b[i];
+  }
+  d->mode = p->mode;
 
   // compare if a[0] in params is set to "magic value" -1.0 for autodetection
   if(p->a[0] == -1.0)
@@ -1997,16 +2168,37 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev
       d->b[k] = interpolated.b[k];
     }
   }
+
+  for(int ch = 0; ch < DT_DENOISE_PROFILE_NONE; ch++)
+  {
+    dt_draw_curve_set_point(d->curve[ch], 0, p->x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.f, p->y[ch][0]);
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+      dt_draw_curve_set_point(d->curve[ch], k, p->x[ch][k], p->y[ch][k]);
+    dt_draw_curve_set_point(d->curve[ch], DT_IOP_DENOISE_PROFILE_BANDS + 1, p->x[ch][1] + 1.f,
+                            p->y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 1]);
+    dt_draw_curve_calc_values(d->curve[ch], 0.0, 1.0, DT_IOP_DENOISE_PROFILE_BANDS, NULL, d->force[ch]);
+  }
 }
 
 void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
-  piece->data = malloc(sizeof(dt_iop_denoiseprofile_data_t));
+  dt_iop_denoiseprofile_data_t *d = (dt_iop_denoiseprofile_data_t *)malloc(sizeof(dt_iop_denoiseprofile_data_t));
+  dt_iop_denoiseprofile_params_t *default_params = (dt_iop_denoiseprofile_params_t *)self->default_params;
+
+  piece->data = (void *)d;
+  for(int ch = 0; ch < DT_DENOISE_PROFILE_NONE; ch++)
+  {
+    d->curve[ch] = dt_draw_curve_new(0.0, 1.0, CATMULL_ROM);
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+      (void)dt_draw_curve_add_point(d->curve[ch], default_params->x[ch][k], default_params->y[ch][k]);
+  }
   self->commit_params(self, self->default_params, pipe, piece);
 }
 
 void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
+  dt_iop_denoiseprofile_data_t *d = (dt_iop_denoiseprofile_data_t *)(piece->data);
+  for(int ch = 0; ch < DT_DENOISE_PROFILE_NONE; ch++) dt_draw_curve_destroy(d->curve[ch]);
   free(piece->data);
   piece->data = NULL;
 }
@@ -2032,9 +2224,9 @@ static void mode_callback(GtkWidget *w, dt_iop_module_t *self)
   dt_iop_denoiseprofile_gui_data_t *g = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
   p->mode = dt_bauhaus_combobox_get(w);
   if(p->mode == MODE_WAVELETS)
-    gtk_widget_set_visible(g->radius, FALSE);
+    gtk_stack_set_visible_child_name(GTK_STACK(g->stack), "wavelets");
   else
-    gtk_widget_set_visible(g->radius, TRUE);
+    gtk_stack_set_visible_child_name(GTK_STACK(g->stack), "nlm");
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -2042,6 +2234,13 @@ static void radius_callback(GtkWidget *w, dt_iop_module_t *self)
 {
   dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)self->params;
   p->radius = (int)dt_bauhaus_slider_get(w);
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+static void nbhood_callback(GtkWidget *w, dt_iop_module_t *self)
+{
+  dt_iop_denoiseprofile_params_t *p = self->params;
+  p->nbhood = (int)dt_bauhaus_slider_get(w);
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -2058,13 +2257,14 @@ void gui_update(dt_iop_module_t *self)
   dt_iop_denoiseprofile_gui_data_t *g = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
   dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)self->params;
   dt_bauhaus_slider_set(g->radius, p->radius);
+  dt_bauhaus_slider_set(g->nbhood, p->nbhood);
   dt_bauhaus_slider_set(g->strength, p->strength);
   dt_bauhaus_combobox_set(g->mode, p->mode);
   dt_bauhaus_combobox_set(g->profile, -1);
   if(p->mode == MODE_WAVELETS)
-    gtk_widget_set_visible(g->radius, FALSE);
+    gtk_stack_set_visible_child_name(GTK_STACK(g->stack), "wavelets");
   else
-    gtk_widget_set_visible(g->radius, TRUE);
+    gtk_stack_set_visible_child_name(GTK_STACK(g->stack), "nlm");
   if(p->a[0] == -1.0)
   {
     dt_bauhaus_combobox_set(g->profile, 0);
@@ -2085,25 +2285,412 @@ void gui_update(dt_iop_module_t *self)
   }
 }
 
+static void dt_iop_denoiseprofile_get_params(dt_iop_denoiseprofile_params_t *p, const int ch, const double mouse_x,
+                                             const double mouse_y, const float rad)
+{
+  for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+  {
+    const float f = expf(-(mouse_x - p->x[ch][k]) * (mouse_x - p->x[ch][k]) / (rad * rad));
+    p->y[ch][k] = (1 - f) * p->y[ch][k] + f * mouse_y;
+  }
+}
+
+static gboolean denoiseprofile_draw(GtkWidget *widget, cairo_t *crf, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  dt_iop_denoiseprofile_params_t p = *(dt_iop_denoiseprofile_params_t *)self->params;
+
+  int ch = (int)c->channel;
+  dt_draw_curve_set_point(c->transition_curve, 0, p.x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.f, p.y[ch][0]);
+  for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+    dt_draw_curve_set_point(c->transition_curve, k + 1, p.x[ch][k], p.y[ch][k]);
+  dt_draw_curve_set_point(c->transition_curve, DT_IOP_DENOISE_PROFILE_BANDS + 1, p.x[ch][1] + 1.f,
+                          p.y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 1]);
+
+  const int inset = DT_IOP_DENOISE_PROFILE_INSET;
+  GtkAllocation allocation;
+  gtk_widget_get_allocation(widget, &allocation);
+  int width = allocation.width, height = allocation.height;
+  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+  cairo_t *cr = cairo_create(cst);
+  cairo_set_source_rgb(cr, .2, .2, .2);
+
+  cairo_paint(cr);
+
+  cairo_translate(cr, inset, inset);
+  width -= 2 * inset;
+  height -= 2 * inset;
+
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.0));
+  cairo_set_source_rgb(cr, .1, .1, .1);
+  cairo_rectangle(cr, 0, 0, width, height);
+  cairo_stroke(cr);
+
+  cairo_set_source_rgb(cr, .3, .3, .3);
+  cairo_rectangle(cr, 0, 0, width, height);
+  cairo_fill(cr);
+
+  // draw grid
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(.4));
+  cairo_set_source_rgb(cr, .1, .1, .1);
+  dt_draw_grid(cr, 8, 0, 0, width, height);
+
+  if(c->mouse_y > 0 || c->dragging)
+  {
+    // draw min/max curves:
+    dt_iop_denoiseprofile_get_params(&p, c->channel, c->mouse_x, 1., c->mouse_radius);
+    dt_draw_curve_set_point(c->transition_curve, 0, p.x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.f, p.y[ch][0]);
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+      dt_draw_curve_set_point(c->transition_curve, k + 1, p.x[ch][k], p.y[ch][k]);
+    dt_draw_curve_set_point(c->transition_curve, DT_IOP_DENOISE_PROFILE_BANDS + 1, p.x[ch][1] + 1.f,
+                            p.y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 1]);
+    dt_draw_curve_calc_values(c->transition_curve, 0.0, 1.0, DT_IOP_DENOISE_PROFILE_RES, c->draw_min_xs,
+                              c->draw_min_ys);
+
+    p = *(dt_iop_denoiseprofile_params_t *)self->params;
+    dt_iop_denoiseprofile_get_params(&p, c->channel, c->mouse_x, .0, c->mouse_radius);
+    dt_draw_curve_set_point(c->transition_curve, 0, p.x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.f, p.y[ch][0]);
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+      dt_draw_curve_set_point(c->transition_curve, k + 1, p.x[ch][k], p.y[ch][k]);
+    dt_draw_curve_set_point(c->transition_curve, DT_IOP_DENOISE_PROFILE_BANDS + 1, p.x[ch][1] + 1.f,
+                            p.y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 1]);
+    dt_draw_curve_calc_values(c->transition_curve, 0.0, 1.0, DT_IOP_DENOISE_PROFILE_RES, c->draw_max_xs,
+                              c->draw_max_ys);
+  }
+
+  cairo_save(cr);
+
+  // draw selected cursor
+  cairo_translate(cr, 0, height);
+
+  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));
+
+  for(int i = 0; i < DT_DENOISE_PROFILE_NONE; i++)
+  {
+    // draw curves, selected last
+    ch = ((int)c->channel + i + 1) % DT_DENOISE_PROFILE_NONE;
+    float alpha = 0.3;
+    if(i == DT_DENOISE_PROFILE_NONE - 1) alpha = 1.0;
+    switch(ch)
+    {
+      case 0:
+        cairo_set_source_rgba(cr, .7, .7, .7, alpha);
+        break;
+      case 1:
+        cairo_set_source_rgba(cr, .7, .1, .1, alpha);
+        break;
+      case 2:
+        cairo_set_source_rgba(cr, .1, .7, .1, alpha);
+        break;
+      case 3:
+        cairo_set_source_rgba(cr, .1, .1, .7, alpha);
+        break;
+    }
+
+    p = *(dt_iop_denoiseprofile_params_t *)self->params;
+    dt_draw_curve_set_point(c->transition_curve, 0, p.x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.0f, p.y[ch][0]);
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+      dt_draw_curve_set_point(c->transition_curve, k + 1, p.x[ch][k], p.y[ch][k]);
+    dt_draw_curve_set_point(c->transition_curve, DT_IOP_DENOISE_PROFILE_BANDS + 1, p.x[ch][1] + 1.0f,
+                            p.y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 1]);
+    dt_draw_curve_calc_values(c->transition_curve, 0.0, 1.0, DT_IOP_DENOISE_PROFILE_RES, c->draw_xs, c->draw_ys);
+    cairo_move_to(cr, 0 * width / (float)(DT_IOP_DENOISE_PROFILE_RES - 1), -height * c->draw_ys[0]);
+    for(int k = 1; k < DT_IOP_DENOISE_PROFILE_RES; k++)
+      cairo_line_to(cr, k * width / (float)(DT_IOP_DENOISE_PROFILE_RES - 1), -height * c->draw_ys[k]);
+    cairo_stroke(cr);
+  }
+
+  ch = c->channel;
+  // draw dots on knots
+  cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.));
+  for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+  {
+    cairo_arc(cr, width * p.x[ch][k], -height * p.y[ch][k], DT_PIXEL_APPLY_DPI(3.0), 0.0, 2.0 * M_PI);
+    if(c->x_move == k)
+      cairo_fill(cr);
+    else
+      cairo_stroke(cr);
+  }
+
+  if(c->mouse_y > 0 || c->dragging)
+  {
+    // draw min/max, if selected
+    cairo_set_source_rgba(cr, .7, .7, .7, .6);
+    cairo_move_to(cr, 0, -height * c->draw_min_ys[0]);
+    for(int k = 1; k < DT_IOP_DENOISE_PROFILE_RES; k++)
+      cairo_line_to(cr, k * width / (float)(DT_IOP_DENOISE_PROFILE_RES - 1), -height * c->draw_min_ys[k]);
+    for(int k = DT_IOP_DENOISE_PROFILE_RES - 1; k >= 0; k--)
+      cairo_line_to(cr, k * width / (float)(DT_IOP_DENOISE_PROFILE_RES - 1), -height * c->draw_max_ys[k]);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    // draw mouse focus circle
+    cairo_set_source_rgba(cr, .9, .9, .9, .5);
+    const float pos = DT_IOP_DENOISE_PROFILE_RES * c->mouse_x;
+    int k = (int)pos;
+    const float f = k - pos;
+    if(k >= DT_IOP_DENOISE_PROFILE_RES - 1) k = DT_IOP_DENOISE_PROFILE_RES - 2;
+    float ht = -height * (f * c->draw_ys[k] + (1 - f) * c->draw_ys[k + 1]);
+    cairo_arc(cr, c->mouse_x * width, ht, c->mouse_radius * width, 0, 2. * M_PI);
+    cairo_stroke(cr);
+  }
+
+  cairo_restore(cr);
+
+  cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+
+  // draw labels:
+  PangoLayout *layout;
+  PangoRectangle ink;
+  PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
+  pango_font_description_set_absolute_size(desc, (.06 * height) * PANGO_SCALE);
+  layout = pango_cairo_create_layout(cr);
+  pango_layout_set_font_description(layout, desc);
+  cairo_set_source_rgb(cr, .1, .1, .1);
+
+  pango_layout_set_text(layout, _("coarse"), -1);
+  pango_layout_get_pixel_extents(layout, &ink, NULL);
+  cairo_move_to(cr, .02 * width - ink.y, .5 * (height + ink.width));
+  cairo_save(cr);
+  cairo_rotate(cr, -M_PI * .5f);
+  pango_cairo_show_layout(cr, layout);
+  cairo_restore(cr);
+
+  pango_layout_set_text(layout, _("fine"), -1);
+  pango_layout_get_pixel_extents(layout, &ink, NULL);
+  cairo_move_to(cr, .98 * width - ink.height, .5 * (height + ink.width));
+  cairo_save(cr);
+  cairo_rotate(cr, -M_PI * .5f);
+  pango_cairo_show_layout(cr, layout);
+  cairo_restore(cr);
+
+
+  pango_layout_set_text(layout, _("smooth"), -1);
+  pango_layout_get_pixel_extents(layout, &ink, NULL);
+  cairo_move_to(cr, .5 * (width - ink.width), .08 * height - ink.height);
+  pango_cairo_show_layout(cr, layout);
+
+  pango_layout_set_text(layout, _("noisy"), -1);
+  pango_layout_get_pixel_extents(layout, &ink, NULL);
+  cairo_move_to(cr, .5 * (width - ink.width), .97 * height - ink.height);
+  pango_cairo_show_layout(cr, layout);
+
+  pango_font_description_free(desc);
+  g_object_unref(layout);
+  cairo_destroy(cr);
+  cairo_set_source_surface(crf, cst, 0, 0);
+  cairo_paint(crf);
+  cairo_surface_destroy(cst);
+  return TRUE;
+}
+
+static gboolean denoiseprofile_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)self->params;
+  const int inset = DT_IOP_DENOISE_PROFILE_INSET;
+  GtkAllocation allocation;
+  gtk_widget_get_allocation(widget, &allocation);
+  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;
+  if(!c->dragging) c->mouse_x = CLAMP(event->x - inset, 0, width) / (float)width;
+  c->mouse_y = 1.0 - CLAMP(event->y - inset, 0, height) / (float)height;
+  if(c->dragging)
+  {
+    *p = c->drag_params;
+    if(c->x_move < 0)
+    {
+      dt_iop_denoiseprofile_get_params(p, c->channel, c->mouse_x, c->mouse_y + c->mouse_pick, c->mouse_radius);
+    }
+    dt_dev_add_history_item(darktable.develop, self, TRUE);
+  }
+  else
+  {
+    c->x_move = -1;
+  }
+  gtk_widget_queue_draw(widget);
+  gint x, y;
+#if GTK_CHECK_VERSION(3, 20, 0)
+  gdk_window_get_device_position(
+      event->window, gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_window_get_display(event->window))), &x,
+      &y, 0);
+#else
+  gdk_window_get_device_position(
+      event->window,
+      gdk_device_manager_get_client_pointer(gdk_display_get_device_manager(gdk_window_get_display(event->window))),
+      &x, &y, NULL);
+#endif
+  return TRUE;
+}
+
+static gboolean denoiseprofile_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  const int ch = c->channel;
+  if(event->button == 1 && event->type == GDK_2BUTTON_PRESS)
+  {
+    // reset current curve
+    dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)self->params;
+    dt_iop_denoiseprofile_params_t *d = (dt_iop_denoiseprofile_params_t *)self->default_params;
+    /*   dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data; */
+    for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+    {
+      p->x[ch][k] = d->x[ch][k];
+      p->y[ch][k] = d->y[ch][k];
+    }
+    dt_dev_add_history_item(darktable.develop, self, TRUE);
+    gtk_widget_queue_draw(self->widget);
+  }
+  else if(event->button == 1)
+  {
+    c->drag_params = *(dt_iop_denoiseprofile_params_t *)self->params;
+    const int inset = DT_IOP_DENOISE_PROFILE_INSET;
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(widget, &allocation);
+    int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;
+    c->mouse_pick
+        = dt_draw_curve_calc_value(c->transition_curve, CLAMP(event->x - inset, 0, width) / (float)width);
+    c->mouse_pick -= 1.0 - CLAMP(event->y - inset, 0, height) / (float)height;
+    c->dragging = 1;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static gboolean denoiseprofile_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+  if(event->button == 1)
+  {
+    dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+    dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+    c->dragging = 0;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static gboolean denoiseprofile_leave_notify(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  if(!c->dragging) c->mouse_y = -1.0;
+  gtk_widget_queue_draw(widget);
+  return TRUE;
+}
+
+static gboolean denoiseprofile_scrolled(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+
+  gdouble delta_y;
+  if(dt_gui_get_scroll_deltas(event, NULL, &delta_y))
+  {
+    c->mouse_radius = CLAMP(c->mouse_radius * (1.f + 0.1f * delta_y), 0.2f / DT_IOP_DENOISE_PROFILE_BANDS, 1.f);
+    gtk_widget_queue_draw(widget);
+  }
+
+  return TRUE;
+}
+
+static void denoiseprofile_tab_switch(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  if(self->dt->gui->reset) return;
+  dt_iop_denoiseprofile_gui_data_t *c = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  c->channel = (dt_iop_denoiseprofile_channel_t)page_num;
+  gtk_widget_queue_draw(self->widget);
+}
+
 void gui_init(dt_iop_module_t *self)
 {
   // init the slider (more sophisticated layouts are possible with gtk tables and boxes):
   self->gui_data = malloc(sizeof(dt_iop_denoiseprofile_gui_data_t));
   dt_iop_denoiseprofile_gui_data_t *g = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
+  dt_iop_denoiseprofile_params_t *p = (dt_iop_denoiseprofile_params_t *)self->params;
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
   g->profiles = NULL;
   g->profile = dt_bauhaus_combobox_new(self);
   g->mode = dt_bauhaus_combobox_new(self);
-  g->radius = dt_bauhaus_slider_new_with_range(self, 0.0f, 4.0f, 1., 1.f, 0);
+  g->radius = dt_bauhaus_slider_new_with_range(self, 0.0f, 4.0f, 1.f, 1.f, 0);
+  g->nbhood = dt_bauhaus_slider_new_with_range(self, 1.0f, 30.0f, 1.f, 7.f, 0);
   g->strength = dt_bauhaus_slider_new_with_range(self, 0.001f, 4.0f, .05, 1.f, 3);
+  g->channel = dt_conf_get_int("plugins/darkroom/denoiseprofile/gui_channel");
+
   gtk_box_pack_start(GTK_BOX(self->widget), g->profile, TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(self->widget), g->mode, TRUE, TRUE, 0);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->radius, TRUE, TRUE, 0);
+
+  g->box_nlm = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  g->box_wavelets = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+
+  gtk_box_pack_start(GTK_BOX(g->box_nlm), g->radius, TRUE, TRUE, 0);
+  gtk_box_pack_start(GTK_BOX(g->box_nlm), g->nbhood, TRUE, TRUE, 0);
+
+  g->channel_tabs = GTK_NOTEBOOK(gtk_notebook_new());
+
+  gtk_notebook_append_page(GTK_NOTEBOOK(g->channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),
+                           gtk_label_new(_("all")));
+  gtk_notebook_append_page(GTK_NOTEBOOK(g->channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),
+                           gtk_label_new(_("R")));
+  gtk_notebook_append_page(GTK_NOTEBOOK(g->channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),
+                           gtk_label_new(_("G")));
+  gtk_notebook_append_page(GTK_NOTEBOOK(g->channel_tabs), GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0)),
+                           gtk_label_new(_("B")));
+
+  gtk_widget_show_all(GTK_WIDGET(gtk_notebook_get_nth_page(g->channel_tabs, g->channel)));
+  gtk_notebook_set_current_page(GTK_NOTEBOOK(g->channel_tabs), g->channel);
+  g_signal_connect(G_OBJECT(g->channel_tabs), "switch_page", G_CALLBACK(denoiseprofile_tab_switch), self);
+
+  const int ch = (int)g->channel;
+  g->transition_curve = dt_draw_curve_new(0.0, 1.0, CATMULL_ROM);
+  (void)dt_draw_curve_add_point(g->transition_curve, p->x[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2] - 1.0f,
+                                p->y[ch][DT_IOP_DENOISE_PROFILE_BANDS - 2]);
+  for(int k = 0; k < DT_IOP_DENOISE_PROFILE_BANDS; k++)
+    (void)dt_draw_curve_add_point(g->transition_curve, p->x[ch][k], p->y[ch][k]);
+  (void)dt_draw_curve_add_point(g->transition_curve, p->x[ch][1] + 1.0f, p->y[ch][1]);
+
+  g->mouse_x = g->mouse_y = g->mouse_pick = -1.0;
+  g->dragging = 0;
+  g->x_move = -1;
+  g->mouse_radius = 1.0f / (DT_IOP_DENOISE_PROFILE_BANDS * 2);
+
+  g->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(0.75));
+
+  gtk_box_pack_start(GTK_BOX(g->box_wavelets), GTK_WIDGET(g->channel_tabs), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(g->box_wavelets), GTK_WIDGET(g->area), FALSE, FALSE, 0);
+
+  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK
+                                                 | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
+                                                 | GDK_LEAVE_NOTIFY_MASK | darktable.gui->scroll_mask);
+  g_signal_connect(G_OBJECT(g->area), "draw", G_CALLBACK(denoiseprofile_draw), self);
+  g_signal_connect(G_OBJECT(g->area), "button-press-event", G_CALLBACK(denoiseprofile_button_press), self);
+  g_signal_connect(G_OBJECT(g->area), "button-release-event", G_CALLBACK(denoiseprofile_button_release), self);
+  g_signal_connect(G_OBJECT(g->area), "motion-notify-event", G_CALLBACK(denoiseprofile_motion_notify), self);
+  g_signal_connect(G_OBJECT(g->area), "leave-notify-event", G_CALLBACK(denoiseprofile_leave_notify), self);
+  g_signal_connect(G_OBJECT(g->area), "scroll-event", G_CALLBACK(denoiseprofile_scrolled), self);
+
+  g->stack = gtk_stack_new();
+  gtk_stack_set_homogeneous(GTK_STACK(g->stack), FALSE);
+  gtk_box_pack_start(GTK_BOX(self->widget), g->stack, TRUE, TRUE, 0);
+
+  gtk_widget_show_all(g->box_nlm);
+  gtk_widget_show_all(g->box_wavelets);
+  gtk_stack_add_named(GTK_STACK(g->stack), g->box_nlm, "nlm");
+  gtk_stack_add_named(GTK_STACK(g->stack), g->box_wavelets, "wavelets");
+  gtk_stack_set_visible_child_name(GTK_STACK(g->stack), "nlm");
+
   gtk_box_pack_start(GTK_BOX(self->widget), g->strength, TRUE, TRUE, 0);
   dt_bauhaus_widget_set_label(g->profile, NULL, _("profile"));
   dt_bauhaus_widget_set_label(g->mode, NULL, _("mode"));
   dt_bauhaus_widget_set_label(g->radius, NULL, _("patch size"));
   dt_bauhaus_slider_set_format(g->radius, "%.0f");
+  dt_bauhaus_widget_set_label(g->nbhood, NULL, _("search radius"));
+  dt_bauhaus_slider_set_format(g->nbhood, "%.0f");
   dt_bauhaus_widget_set_label(g->strength, NULL, _("strength"));
   dt_bauhaus_combobox_add(g->mode, _("non-local means"));
   dt_bauhaus_combobox_add(g->mode, _("wavelets"));
@@ -2112,10 +2699,12 @@ void gui_init(dt_iop_module_t *self)
                                          "non-local means works best for `lightness' blending, "
                                          "wavelets work best for `color' blending"));
   gtk_widget_set_tooltip_text(g->radius, _("radius of the patches to match. increase for more sharpness"));
+  gtk_widget_set_tooltip_text(g->nbhood, _("emergency use only: radius of the neighbourhood to search patches in. increase for better denoising performance, but watch the long runtimes! large radii can be very slow. you have been warned"));
   gtk_widget_set_tooltip_text(g->strength, _("finetune denoising strength"));
   g_signal_connect(G_OBJECT(g->profile), "value-changed", G_CALLBACK(profile_callback), self);
   g_signal_connect(G_OBJECT(g->mode), "value-changed", G_CALLBACK(mode_callback), self);
   g_signal_connect(G_OBJECT(g->radius), "value-changed", G_CALLBACK(radius_callback), self);
+  g_signal_connect(G_OBJECT(g->nbhood), "value-changed", G_CALLBACK(nbhood_callback), self);
   g_signal_connect(G_OBJECT(g->strength), "value-changed", G_CALLBACK(strength_callback), self);
 }
 
@@ -2123,6 +2712,7 @@ void gui_cleanup(dt_iop_module_t *self)
 {
   dt_iop_denoiseprofile_gui_data_t *g = (dt_iop_denoiseprofile_gui_data_t *)self->gui_data;
   g_list_free_full(g->profiles, dt_noiseprofile_free);
+  dt_draw_curve_destroy(g->transition_curve);
   // nothing else necessary, gtk will clean up the slider.
   free(self->gui_data);
   self->gui_data = NULL;

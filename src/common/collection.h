@@ -66,8 +66,10 @@ typedef enum dt_collection_sort_t
   DT_COLLECTION_SORT_COLOR,
   DT_COLLECTION_SORT_GROUP,
   DT_COLLECTION_SORT_PATH,
+  DT_COLLECTION_SORT_CUSTOM_ORDER,
   DT_COLLECTION_SORT_TITLE,
-  DT_COLLECTION_SORT_DESCRIPTION
+  DT_COLLECTION_SORT_DESCRIPTION,
+  DT_COLLECTION_SORT_ASPECT_RATIO
 } dt_collection_sort_t;
 
 typedef enum dt_collection_properties_t
@@ -89,8 +91,11 @@ typedef enum dt_collection_properties_t
   DT_COLLECTION_PROP_FOCAL_LENGTH,
   DT_COLLECTION_PROP_ISO,
   DT_COLLECTION_PROP_APERTURE,
+  DT_COLLECTION_PROP_EXPOSURE,
+  DT_COLLECTION_PROP_ASPECT_RATIO,
   DT_COLLECTION_PROP_FILENAME,
   DT_COLLECTION_PROP_GEOTAGGING,
+  DT_COLLECTION_PROP_GROUPING,
   DT_COLLECTION_PROP_LOCAL_COPY
 } dt_collection_properties_t;
 
@@ -129,9 +134,9 @@ typedef struct dt_collection_params_t
 typedef struct dt_collection_t
 {
   int clone;
-  gchar *query;
+  gchar *query, *query_no_group;
   gchar **where_ext;
-  unsigned int count;
+  unsigned int count, count_no_group;
   dt_collection_params_t params;
   dt_collection_params_t store;
 } dt_collection_t;
@@ -149,6 +154,8 @@ void dt_collection_get_makermodels(const gchar *filter, GList **sanitized, GList
 gchar *dt_collection_get_makermodel(const char *exif_maker, const char *exif_model);
 /** get the generated query for collection */
 const gchar *dt_collection_get_query(const dt_collection_t *collection);
+/** get the generated query for collection including the images hidden in groups */
+const gchar *dt_collection_get_query_no_group(const dt_collection_t *collection);
 /** updates sql query for a collection. @return 1 if query changed. */
 int dt_collection_update(const dt_collection_t *collection);
 /** reset collection to default dummy selection */
@@ -191,6 +198,8 @@ gchar *dt_collection_get_sort_query(const dt_collection_t *collection);
 
 /** get the count of query */
 uint32_t dt_collection_get_count(const dt_collection_t *collection);
+/** get the count of query including the images hidden in groups */
+uint32_t dt_collection_get_count_no_group(const dt_collection_t *collection);
 /** get the nth image in the query */
 int dt_collection_get_nth(const dt_collection_t *collection, int nth);
 /** get all image ids order as current selection. no more than limit many images are returned, <0 ==
@@ -219,6 +228,14 @@ int dt_collection_serialize(char *buf, int bufsize);
 void dt_collection_split_operator_number(const gchar *input, char **number1, char **number2, char **operator);
 void dt_collection_split_operator_datetime(const gchar *input, char **number1, char **number2,
                                            char **operator);
+void dt_collection_split_operator_exposure(const gchar *input, char **number1, char **number2,
+                                           char **operator);
+
+int64_t dt_collection_get_image_position(const int32_t image_id);
+void dt_collection_shift_image_positions(const unsigned int length, const int64_t image_position);
+
+/* move images with drag and drop */
+void dt_collection_move_before(const int32_t image_id, GList * selected_images);
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

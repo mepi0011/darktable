@@ -41,6 +41,7 @@
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "common/iop_group.h"
 
 // for Kelvin temperature and bogus WB
 #include "common/colorspaces.h"
@@ -154,6 +155,7 @@ static int ignore_missing_wb(dt_image_t *img)
   return FALSE;
 }
 
+
 const char *name()
 {
   return C_("modulename", "white balance");
@@ -162,7 +164,7 @@ const char *name()
 
 int groups()
 {
-  return IOP_GROUP_BASIC;
+  return dt_iop_get_group("white balance", IOP_GROUP_BASIC);
 }
 
 int flags()
@@ -773,7 +775,7 @@ void gui_update(struct dt_iop_module_t *self)
     for(int i = 0; i < wb_preset_count; i++)
     {
       if(g->preset_cnt >= 50) break;
-      if(!strcmp(wb_preset[i].make, self->dev->image_storage.camera_maker) 
+      if(!strcmp(wb_preset[i].make, self->dev->image_storage.camera_maker)
          && !strcmp(wb_preset[i].model, self->dev->image_storage.camera_model))
       {
         if(!wb_name || strcmp(wb_name, wb_preset[i].name))
@@ -810,7 +812,7 @@ void gui_update(struct dt_iop_module_t *self)
     for(int j = DT_IOP_NUM_OF_STD_TEMP_PRESETS; !found && (j < g->preset_cnt); j++)
     {
       // look through all variants of this preset, with different tuning
-      for(int i = g->preset_num[j]; !found && (i < wb_preset_count) 
+      for(int i = g->preset_num[j]; !found && (i < wb_preset_count)
                                     && !strcmp(wb_preset[i].make, self->dev->image_storage.camera_maker)
                                     && !strcmp(wb_preset[i].model, self->dev->image_storage.camera_model)
                                     && !strcmp(wb_preset[i].name, wb_preset[g->preset_num[j]].name);
@@ -1064,7 +1066,7 @@ gui:
       // we're normalizing that to be D65
       for(int i = 0; i < wb_preset_count; i++)
       {
-        if(!strcmp(wb_preset[i].make, module->dev->image_storage.camera_maker) 
+        if(!strcmp(wb_preset[i].make, module->dev->image_storage.camera_maker)
            && !strcmp(wb_preset[i].model, module->dev->image_storage.camera_model)
            && !strcmp(wb_preset[i].name, Daylight) && wb_preset[i].tuning == 0)
         {
@@ -1109,7 +1111,7 @@ void init(dt_iop_module_t *module)
 {
   module->params = calloc(1, sizeof(dt_iop_temperature_params_t));
   module->default_params = calloc(1, sizeof(dt_iop_temperature_params_t));
-  module->priority = 44; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 42; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_temperature_params_t);
   module->gui_data = NULL;
 }
@@ -1277,7 +1279,7 @@ static void apply_preset(dt_iop_module_t *self)
     {
       gboolean found = FALSE;
       // look through all variants of this preset, with different tuning
-      for(int i = g->preset_num[pos]; (i < wb_preset_count) 
+      for(int i = g->preset_num[pos]; (i < wb_preset_count)
                                       && !strcmp(wb_preset[i].make, self->dev->image_storage.camera_maker)
                                       && !strcmp(wb_preset[i].model, self->dev->image_storage.camera_model)
                                       && !strcmp(wb_preset[i].name, wb_preset[g->preset_num[pos]].name);
@@ -1379,12 +1381,13 @@ static void gui_sliders_update(struct dt_iop_module_t *self)
 
 void gui_init(struct dt_iop_module_t *self)
 {
-  self->gui_data = malloc(sizeof(dt_iop_temperature_gui_data_t));
+  self->gui_data = calloc(1, sizeof(dt_iop_temperature_gui_data_t));
   dt_iop_temperature_gui_data_t *g = (dt_iop_temperature_gui_data_t *)self->gui_data;
   dt_iop_temperature_params_t *p = (dt_iop_temperature_params_t *)self->default_params;
 
   self->request_color_pick = DT_REQUEST_COLORPICK_OFF;
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
   g_signal_connect(G_OBJECT(self->widget), "draw", G_CALLBACK(draw), self);
 
   g->stack = gtk_stack_new();

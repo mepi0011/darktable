@@ -18,6 +18,7 @@
 
 #include "common/collection.h"
 #include "common/darktable.h"
+#include "common/l10n.h"
 #include "control/conf.h"
 #include "control/control.h"
 #include "dtgtk/button.h"
@@ -118,6 +119,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_widget_set_tooltip_text(d->preferences_button, _("show global preferences"));
   g_signal_connect(G_OBJECT(d->preferences_button), "clicked", G_CALLBACK(_lib_preferences_button_clicked),
                    NULL);
+  dt_gui_add_help_link(d->preferences_button, dt_get_help_url("global_toolbox_preferences"));
 }
 
 void gui_cleanup(dt_lib_module_t *self)
@@ -201,6 +203,7 @@ static void _main_do_event(GdkEvent *event, gpointer data)
     case GDK_BUTTON_PRESS:
     {
       // reset GTK to normal behaviour
+      dt_control_allow_change_cursor();
       dt_control_change_cursor(GDK_LEFT_PTR);
       gdk_event_handler_set((GdkEventFunc)gtk_main_do_event, NULL, NULL);
       g_signal_handlers_block_by_func(d->help_button, _lib_help_button_clicked, d);
@@ -238,8 +241,30 @@ static void _main_do_event(GdkEvent *event, gpointer data)
           }
           if(base_url)
           {
-            // TODO: try to use the currently set language
+            gboolean is_language_supported = FALSE;
             char *lang = "en";
+            if(darktable.l10n!=NULL)
+            {
+              dt_l10n_language_t *language = NULL;
+              if(darktable.l10n->selected!=-1)
+                  language = (dt_l10n_language_t *)g_list_nth(darktable.l10n->languages, darktable.l10n->selected)->data;
+              if (language != NULL)
+                lang = language->code;
+              // array of languages the usermanual supports.
+              // NULL MUST remain the last element of the array
+              const char *supported_languages[] = { "en", "fr", "it", "es", NULL };
+              int i = 0;
+              while(supported_languages[i])
+              {
+                if(!strcmp(lang, supported_languages[i]))
+                {
+                  is_language_supported = TRUE;
+                  break;
+                }
+                i++;
+              }
+            }
+            if(!is_language_supported) lang = "en";
             char *url = g_build_path("/", base_url, lang, help_url, NULL);
             // TODO: call the web browser directly so that file:// style base for local installs works
 #if GTK_CHECK_VERSION(3, 22, 0)
@@ -249,7 +274,12 @@ static void _main_do_event(GdkEvent *event, gpointer data)
 #endif
             g_free(base_url);
             g_free(url);
+            dt_control_log(_("help url opened in web brower"));
           }
+        }
+        else
+        {
+          dt_control_log(_("there is no help available for this element"));
         }
       }
       handled = TRUE;
@@ -265,8 +295,10 @@ static void _main_do_event(GdkEvent *event, gpointer data)
         if(help_url)
         {
           // TODO: find a better way to tell the user that the hovered widget has a help link
-          dt_cursor_t cursor = event->type == GDK_ENTER_NOTIFY ? GDK_HAND1 : GDK_QUESTION_ARROW;
+          dt_cursor_t cursor = event->type == GDK_ENTER_NOTIFY ? GDK_QUESTION_ARROW : GDK_X_CURSOR;
+          dt_control_allow_change_cursor();
           dt_control_change_cursor(cursor);
+          dt_control_forbid_change_cursor();
         }
       }
       break;
@@ -280,7 +312,8 @@ static void _main_do_event(GdkEvent *event, gpointer data)
 
 static void _lib_help_button_clicked(GtkWidget *widget, gpointer user_data)
 {
-  dt_control_change_cursor(GDK_QUESTION_ARROW);
+  dt_control_change_cursor(GDK_X_CURSOR);
+  dt_control_forbid_change_cursor();
   gdk_event_handler_set(_main_do_event, user_data, NULL);
 }
 
