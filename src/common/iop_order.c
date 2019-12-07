@@ -77,21 +77,20 @@ static void _rewrite_order(GList *iop_order_list)
 }
 
 /* migrates *_iop_order_list from old_version to the next version (version + 1)
- * limitations:
- * - to move an existing module that is always enabled a new version must be created, otherwise
- *   modules can be added/moved in the current version
- * - a module can't be more than once on the same version
+ *
+ * Basically here there is two orders:
+ *   v2 : legacy order used for edits done prior to 3.0
+ *   v5 : new order for all edits starting with 3.0
  */
 static int _ioppr_legacy_iop_order_step(GList **_iop_order_list, GList *history_list, const int old_version, const int dont_move)
 {
   int new_version = -1;
 
   // version 1 --> 2
+  // v2 is the version that will be used for all edits started before 3.0 was out.
+  // v2 corresponds to the legacy order (as proposed up to 2.6.3) with the new modules available.
   if(old_version == 1)
   {
-    _ioppr_move_iop_after(_iop_order_list, "colorin", "demosaic", dont_move);
-    _ioppr_move_iop_before(_iop_order_list, "colorout", "clahe", dont_move);
-
     // EVERY NEW MODULE MUST BE ADDED HERE
     // there should be no _ioppr_insert_iop[before|after] in any other places
     _ioppr_insert_iop_after(_iop_order_list, history_list, "basicadj", "colorin", dont_move);
@@ -106,6 +105,7 @@ static int _ioppr_legacy_iop_order_step(GList **_iop_order_list, GList *history_
     new_version = 2;
   }
   // version 2 --> 3
+  // v3 is a temporary version corresponding to first attempt to propose a new order during development of 3.0.
   else if(old_version == 2)
   {
     // GENERAL RULE FOR SIGNAL PROCESSING/RECONSTRUCTION
@@ -197,6 +197,8 @@ static int _ioppr_legacy_iop_order_step(GList **_iop_order_list, GList *history_
 
     new_version = 3;
   }
+  // version 3 --> 4
+  // v4 is a temporary version corresponding to second attempt to propose a new order during development of 3.0.
   else if(old_version == 3)
   {
     // version 4 is a rewrite of the iop-order of previous list. As it
@@ -207,6 +209,8 @@ static int _ioppr_legacy_iop_order_step(GList **_iop_order_list, GList *history_
     if(!dont_move) _rewrite_order(*_iop_order_list);
     new_version = 4;
   }
+  // version 4 --> 5
+  // v5 is the final order proposed for new edits in 3.0.
   else if(old_version == 4)
   {
     if(!dont_move)
@@ -1652,13 +1656,13 @@ static int _ioppr_migrate_iop_order(const int imgid, const int current_iop_order
   // process some more checks possibly; any sort data that can't be correct?
 
   // print complete history information
-  fprintf(stderr,"\n\n ***** On-the-fly history V[%i]->V[%i], imageid: %i ****************",
+  fprintf(stderr, "\n ***** On-the-fly history V[%i]->V[%i], imageid: %i ****************\n",
           current_iop_order_version, _iop_order_version, imgid);
   for (int i=0;i<history_size;i++)
   {
     struct dt_onthefly_history_t *this = &myhistory[i];
-    fprintf(stderr,"\n %3i %20s multi%3i :: iop %14.11f -> %14.11f",
-            this->num, this->operation, this->multi_priority, this->old_iop_order, this->new_iop_order);
+    fprintf(stderr, " %3i %20s multi%3i :: iop %14.11f -> %14.11f\n", this->num, this->operation,
+            this->multi_priority, this->old_iop_order, this->new_iop_order);
   }
 
   // Now write history
@@ -2165,7 +2169,7 @@ static inline void _transform_rgb_to_lab_matrix(const float *const restrict imag
                                                 const dt_iop_order_iccprofile_info_t *const profile_info)
 {
   const int ch = 4;
-  const size_t stride = (size_t)(width * height * ch);
+  const size_t stride = (size_t)width * height * ch;
   const float *const restrict matrix = profile_info->matrix_in;
 
   if(profile_info->nonlinearlut)
@@ -2248,7 +2252,7 @@ static inline void _transform_matrix_rgb(const float *const restrict image_in, f
                                   const dt_iop_order_iccprofile_info_t *const profile_info_to)
 {
   const int ch = 4;
-  const size_t stride = (size_t)(width * height * ch);
+  const size_t stride = (size_t)width * height * ch;
   const float *const restrict matrix_in = profile_info_from->matrix_in;
   const float *const restrict matrix_out = profile_info_to->matrix_out;
 
@@ -2751,7 +2755,7 @@ static __m128 _ioppr_xyz_to_linear_rgb_matrix_sse(const __m128 xyz, const dt_iop
 static void _transform_rgb_to_lab_matrix_sse(float *const image, const int width, const int height, const dt_iop_order_iccprofile_info_t *const profile_info)
 {
   const int ch = 4;
-  const size_t stride = (size_t)(width * height);
+  const size_t stride = (size_t)width * height;
 
   _apply_tonecurves(image, width, height, profile_info->lut_in[0], profile_info->lut_in[1], profile_info->lut_in[2],
       profile_info->unbounded_coeffs_in[0], profile_info->unbounded_coeffs_in[1], profile_info->unbounded_coeffs_in[2], profile_info->lutsize);
@@ -2833,7 +2837,7 @@ static void _transform_matrix_rgb_sse(float *const image, const int width, const
                                       const dt_iop_order_iccprofile_info_t *const profile_info_to)
 {
   const int ch = 4;
-  const size_t stride = (size_t)(width * height);
+  const size_t stride = (size_t)width * height;
 
   _apply_tonecurves(image, width, height, profile_info_from->lut_in[0], profile_info_from->lut_in[1],
                     profile_info_from->lut_in[2], profile_info_from->unbounded_coeffs_in[0],
@@ -2877,7 +2881,8 @@ void dt_ioppr_transform_image_colorspace(struct dt_iop_module_t *self, const flo
   }
   if(profile_info == NULL)
   {
-    fprintf(stderr, "[dt_ioppr_transform_image_colorspace] module %s must be between input color profile and output color profile\n", self->op);
+    if (!dt_image_is_monochrome(&self->dev->image_storage))
+      fprintf(stderr, "[dt_ioppr_transform_image_colorspace] module %s must be between input color profile and output color profile\n", self->op);
     *converted_cst = cst_from;
     return;
   }
@@ -3135,7 +3140,8 @@ int dt_ioppr_transform_image_colorspace_cl(struct dt_iop_module_t *self, const i
   }
   if(profile_info == NULL)
   {
-    fprintf(stderr, "[dt_ioppr_transform_image_colorspace_cl] module %s must be between input color profile and output color profile\n", self->op);
+    if (!dt_image_is_monochrome(&self->dev->image_storage))
+      fprintf(stderr, "[dt_ioppr_transform_image_colorspace_cl] module %s must be between input color profile and output color profile\n", self->op);
     *converted_cst = cst_from;
     return FALSE;
   }
